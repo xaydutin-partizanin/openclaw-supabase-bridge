@@ -19,8 +19,13 @@ import {
 } from "./notification-coordinator.js";
 import { errorMessage, toJson } from "./object-utils.js";
 import { QuotaCollector } from "./quota.js";
-import { resolveExecutionConfig } from "./config-resolution.js";
+import { resolveTargetedExecutionConfig } from "./config-resolution.js";
 import { sanitizeEventData } from "./sanitizer.js";
+import { resolveExecutionTarget } from "./task-targeting.js";
+import { capabilityCollectors } from "./telemetry/collectors/capabilities.js";
+import { coreCollectors } from "./telemetry/collectors/core.js";
+import { operationCollectors } from "./telemetry/collectors/operations.js";
+import { TelemetryManager } from "./telemetry/manager.js";
 import { TerminalWriter } from "./terminal-writer.js";
 import type {
   AgentConfigRecord,
@@ -32,6 +37,7 @@ import type {
   Json,
   OpenClawAgentEvent,
   PluginConfig,
+  ExecutionTargetPlan,
   TerminalWriteInput,
 } from "./types.js";
 
@@ -110,10 +116,6 @@ function terminalError(
   return result.meta.error?.message ?? result.meta.failureSignal?.message ?? null;
 }
 
-function taskSessionKey(agentId: string, taskId: string): string {
-  return `agent:${agentId}:supabase-bridge:${taskId}`;
-}
-
 export class BridgeController {
   readonly #api: OpenClawPluginApi;
   readonly #cfg: OpenClawConfig;
@@ -128,6 +130,7 @@ export class BridgeController {
   #database: BridgeDatabase | null = null;
   #eventBuffer: EventBuffer | null = null;
   #terminalWriter: TerminalWriter | null = null;
+  #telemetry: TelemetryManager | null = null;
   #coordinator: TaskNotificationCoordinator<TaskPayload> | null = null;
   #inventory: InventorySnapshot | null = null;
   #inventoryIds: InventoryIds = { providerIds: new Map(), configIds: new Map() };
@@ -191,6 +194,20 @@ export class BridgeController {
     await this.#coordinator.start();
     await this.#refreshInventory(true);
     await this.#refreshQuota("startup");
+    if (this.#config.telemetryEnabled) {
+      this.#telemetry = new TelemetryManager({
+        api: this.#api,
+        cfg: this.#cfg,
+        sink: this.#database,
+        logger: this.#logger,
+        instanceKey: this.#config.instanceKey,
+        workerId: this.#config.workerId,
+        heartbeatSeconds: this.#config.telemetryHeartbeatSeconds,
+        collectors: [...coreCollectors, ...capabilityCollectors, ...operationCollectors],
+      });
+      this.#resources.add(async () => this.#telemetry?.stop());
+      await this.#telemetry.start();
+    }
     await this.#reconcile();
     await this.#subscribeRealtime();
 
@@ -229,6 +246,11 @@ export class BridgeController {
   }
 
   async handleAgentEvent(event: OpenClawAgentEvent): Promise<void> {
+    try {
+      await this.#telemetry?.handleAgentEvent(event);
+    } catch (error) {
+      this.#logger.warn("Supabase Bridge operational telemetry event write failed", { error: errorMessage(error) });
+    }
     if (!this.#config.eventLoggingEnabled || !this.#eventBuffer || !this.#database) return;
     const correlated = this.#correlator.correlate(event);
     if (!correlated) return;
@@ -243,7 +265,16 @@ export class BridgeController {
         this.#logger.warn("Supabase Bridge could not attach OpenClaw run id", { error: errorMessage(error) });
       }
     }
-    this.#eventBuffer.append(buildBridgeEvent(correlated, this.#config.eventMaxPayloadBytes));
+    const bridgeEvent = buildBridgeEvent(correlated, this.#config.eventMaxPayloadBytes);
+    if (bridgeEvent) this.#eventBuffer.append(bridgeEvent);
+  }
+
+  async handleHook(name: string, event: unknown, context?: unknown): Promise<void> {
+    try {
+      await this.#telemetry?.handleHook(name, event, context);
+    } catch (error) {
+      this.#logger.warn("Supabase Bridge operational hook telemetry write failed", { hook: name, error: errorMessage(error) });
+    }
   }
 
   async requestCancellation(taskId: string): Promise<void> {
@@ -379,6 +410,7 @@ export class BridgeController {
   }
 
   #handleRealtimeHealth(health: RealtimeHealth, detail?: string): void {
+    this.#telemetry?.setRealtimeState(health === "connected" ? "connected" : health, detail);
     if (health === "connected") {
       const reconnected = this.#reconnectAttempt > 0;
       this.#reconnectAttempt = 0;
@@ -422,11 +454,22 @@ export class BridgeController {
       return;
     }
     this.#logger.info("Supabase Bridge task claim succeeded", { taskId });
+    this.#telemetry?.noteOperation("claim");
 
     try {
       await this.#refreshInventory(false);
-      const resolved = resolveExecutionConfig(claimed.requestedConfig, this.#inventory!.configs);
-      await this.#runClaimedTask(claimed, resolved.config, resolved);
+      const target = await this.#database.getTaskTarget(claimed.id);
+      const resolved = resolveTargetedExecutionConfig(claimed.requestedConfig, target?.agentId, this.#inventory!.configs);
+      const defaultWorkspace = this.#api.runtime.agent.resolveAgentWorkspaceDir(this.#cfg, resolved.config.agent);
+      const executionTarget = await resolveExecutionTarget({
+        gateway: this.#api.runtime.gateway,
+        target,
+        taskId: claimed.id,
+        instanceKey: this.#config.instanceKey,
+        selected: resolved.config,
+        defaultWorkspace,
+      });
+      await this.#runClaimedTask(claimed, resolved.config, resolved, executionTarget);
     } catch (error) {
       const message = errorMessage(error);
       this.#logger.error("Supabase Bridge could not start claimed task", { taskId, error: message });
@@ -442,12 +485,13 @@ export class BridgeController {
   async #runClaimedTask(
     task: BridgeTask,
     selected: AgentConfigRecord,
-    resolved: ReturnType<typeof resolveExecutionConfig>,
+    resolved: ReturnType<typeof resolveTargetedExecutionConfig>,
+    target: ExecutionTargetPlan,
   ): Promise<void> {
     if (!this.#database || !this.#terminalWriter || !this.#eventBuffer) throw new Error("Bridge is not initialized");
     const runId = randomUUID();
-    const sessionId = randomUUID();
-    const sessionKey = taskSessionKey(selected.agent, task.id);
+    const sessionId = target.actualSessionId;
+    const sessionKey = target.actualSessionKey;
     const startInput: StartRunInput = {
       runId,
       task,
@@ -457,9 +501,17 @@ export class BridgeController {
       providerId: this.#inventoryIds.providerIds.get(selected.providerKey) ?? null,
       parentSessionKey: sessionKey,
       parentSessionId: sessionId,
+      target,
       metadata: {
         inventory_refreshed_at: this.#inventory?.refreshedAt ?? null,
         direct_routing: true,
+        legacy_targeting: target.legacy,
+        session_policy: target.sessionPolicy,
+        source_session_key: target.sourceSessionKey,
+        source_session_id: target.sourceSessionId,
+        workspace_path: target.workspacePath,
+        worktree_path: target.worktreePath,
+        queued_for_busy_session: target.queuedForBusySession,
       },
     };
     const run = await this.#database.startRun(startInput);
@@ -476,6 +528,15 @@ export class BridgeController {
         used_config: selected.configKey,
         fallback_used: resolved.fallbackUsed,
         fallback_reason: resolved.fallbackReason,
+        session_policy: target.sessionPolicy,
+        requested_session_key: target.sourceSessionKey,
+        actual_session_key: target.actualSessionKey,
+        actual_agent_id: target.agentId,
+        requested_instance_key: target.requestedInstanceKey,
+        requested_agent_id: target.requestedAgentId,
+        node_key: target.nodeKey,
+        node_id: target.nodeId,
+        cwd: target.cwd,
       },
       maxPayloadBytes: this.#config.eventMaxPayloadBytes,
     }));
@@ -495,7 +556,7 @@ export class BridgeController {
         sessionTarget: { agentId: selected.agent, sessionId, sessionKey },
         agentId: selected.agent,
         workspaceDir,
-        cwd: workspaceDir,
+        cwd: target.cwd,
         prompt: task.prompt,
         trigger: "user",
         messageChannel: "supabase-bridge",
@@ -550,6 +611,7 @@ export class BridgeController {
         maxPayloadBytes: this.#config.eventMaxPayloadBytes,
       }));
       await this.#eventBuffer.flush();
+      this.#telemetry?.noteOperation("event_flush");
       await this.#terminalWriter.write({
         taskId: task.id,
         runId,
@@ -559,6 +621,10 @@ export class BridgeController {
           summary: reportText,
           status,
           used_config: selected.configKey,
+          actual_session_key: target.actualSessionKey,
+          actual_session_id: target.actualSessionId,
+          actual_agent_id: target.agentId,
+          session_policy: target.sessionPolicy,
         },
         error,
         metadata,
@@ -567,6 +633,7 @@ export class BridgeController {
         actualProviderKey: actualProvider,
         actualModel,
       });
+      this.#telemetry?.noteOperation("report");
       this.#logger.info(status === "completed" ? "Supabase Bridge run completed" : "Supabase Bridge run failed", {
         taskId: task.id,
         runId,
@@ -588,6 +655,7 @@ export class BridgeController {
         actualProviderKey: selected.runtime === "acp" ? null : selected.providerKey,
         actualModel: selected.runtime === "acp" ? null : selected.model,
       });
+      this.#telemetry?.noteOperation("report");
       this.#logger.error("Supabase Bridge run failed", { taskId: task.id, runId, error: message });
     } finally {
       clearInterval(leaseTimer);

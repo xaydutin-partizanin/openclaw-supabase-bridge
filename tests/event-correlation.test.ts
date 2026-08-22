@@ -46,6 +46,15 @@ describe("agent event correlation", () => {
     const correlator = new EventCorrelator();
     correlator.registerParent({ taskId: "task-1", bridgeRunId: "bridge-run-1", sessionKey: "agent:main:supabase-bridge:task-1", sessionId: "session-1" });
     const correlated = correlator.correlate(event())!;
-    expect(buildBridgeEvent(correlated, 10_000).eventKey).toBe(buildBridgeEvent(correlated, 10_000).eventKey);
+    expect(buildBridgeEvent(correlated, 10_000)!.eventKey).toBe(buildBridgeEvent(correlated, 10_000)!.eventKey);
+  });
+
+  it("drops content streams and projects tool events to safe operational fields", () => {
+    const correlator = new EventCorrelator();
+    correlator.registerParent({ taskId: "task-1", bridgeRunId: "bridge-run-1", sessionKey: "agent:main:supabase-bridge:task-1", sessionId: "session-1" });
+    const assistant = correlator.correlate(event({ stream: "assistant", data: { delta: "private reply" } }))!;
+    expect(buildBridgeEvent(assistant, 10_000)).toBeNull();
+    const tool = correlator.correlate(event({ stream: "tool", data: { type: "tool_end", toolName: "exec", status: "ok", arguments: { command: "private" }, output: "private output" } }))!;
+    expect(buildBridgeEvent(tool, 10_000)?.data).toEqual({ type: "tool_end", toolName: "exec", status: "ok" });
   });
 });

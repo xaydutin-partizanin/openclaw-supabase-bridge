@@ -85,11 +85,26 @@ function eventType(event: OpenClawAgentEvent): string {
   );
 }
 
+const BRIDGE_OPERATIONAL_STREAMS = new Set([
+  "lifecycle", "tool", "error", "item", "plan", "approval", "compaction", "acp",
+]);
+
+function projectBridgeEventData(data: Record<string, unknown>): Record<string, unknown> {
+  const allowed = [
+    "type", "eventType", "event_type", "phase", "status", "outcome", "toolName", "tool", "durationMs",
+    "backend", "provider", "model", "reason", "failureKind", "errorCategory", "code", "itemId", "toolCallId",
+    "taskId", "flowId", "terminalOutcome", "childSessionKey", "child_session_key", "childSessionId",
+    "child_session_id", "childRunId", "child_run_id", "parentSessionKey", "parentSessionId", "spawnedBy",
+  ];
+  return Object.fromEntries(allowed.flatMap((key) => data[key] === undefined ? [] : [[key, data[key]]]));
+}
+
 export function buildBridgeEvent(
   correlated: CorrelatedAgentEvent,
   maxPayloadBytes: number,
-): BridgeEvent {
+): BridgeEvent | null {
   const { event, bridgeRunId, taskId } = correlated;
+  if (!BRIDGE_OPERATIONAL_STREAMS.has(event.stream)) return null;
   const type = eventType(event);
   const identity = [
     bridgeRunId,
@@ -99,7 +114,7 @@ export function buildBridgeEvent(
     event.stream,
     type,
   ].join("|");
-  const sanitized = sanitizeEventData(event.data, maxPayloadBytes);
+  const sanitized = sanitizeEventData(projectBridgeEventData(event.data), maxPayloadBytes);
   return {
     eventKey: createHash("sha256").update(identity).digest("hex"),
     taskId,

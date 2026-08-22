@@ -12,6 +12,52 @@ export type BridgeTaskStatus =
 
 export type BridgeRunStatus = Exclude<BridgeTaskStatus, "pending"> | "created";
 
+export type TaskSessionPolicy = "new" | "continue" | "fork";
+export type TaskBusyPolicy = "queue" | "reject";
+
+export interface TaskTargetRecord {
+  taskId: string;
+  instanceKey: string | null;
+  agentId: string | null;
+  sessionPolicy: TaskSessionPolicy;
+  sessionKey: string | null;
+  sessionId: string | null;
+  projectKey: string | null;
+  projectPath: string | null;
+  workspaceKey: string | null;
+  workspacePath: string | null;
+  worktreeKey: string | null;
+  worktreePath: string | null;
+  nodeKey: string | null;
+  nodeId: string | null;
+  busyPolicy: TaskBusyPolicy;
+  metadata: Record<string, Json>;
+}
+
+export interface ExecutionTargetPlan {
+  legacy: boolean;
+  requestedInstanceKey: string | null;
+  instanceKey: string;
+  requestedAgentId: string | null;
+  agentId: string;
+  sessionPolicy: TaskSessionPolicy;
+  sourceSessionKey: string | null;
+  sourceSessionId: string | null;
+  actualSessionKey: string;
+  actualSessionId: string;
+  projectKey: string | null;
+  projectPath: string | null;
+  workspaceKey: string | null;
+  workspacePath: string;
+  worktreeKey: string | null;
+  worktreePath: string | null;
+  nodeKey: string | null;
+  nodeId: string | null;
+  cwd: string;
+  busyPolicy: TaskBusyPolicy;
+  queuedForBusySession: boolean;
+}
+
 export interface ProviderRecord {
   id?: string;
   providerKey: string;
@@ -147,6 +193,39 @@ export interface PluginConfig {
   eventLoggingEnabled: boolean;
   eventMaxPayloadBytes: number;
   leaseDurationSeconds: number;
+  instanceKey: string;
+  telemetryEnabled: boolean;
+  telemetryHeartbeatSeconds: number;
+}
+
+export type FreshnessState = "fresh" | "stale" | "error" | "unsupported";
+
+export interface TelemetryRow {
+  [key: string]: Json | undefined;
+}
+
+export interface TelemetryWrite {
+  table: string;
+  rows: TelemetryRow[];
+  onConflict: string;
+}
+
+export interface OperationalEventInput {
+  eventKey: string;
+  instanceKey: string;
+  bootId: string;
+  source: string;
+  domain: string;
+  severity: "debug" | "info" | "warning" | "error";
+  eventType: string;
+  eventTs: string;
+  agentId?: string | null;
+  sessionKey?: string | null;
+  sessionId?: string | null;
+  runId?: string | null;
+  taskId?: string | null;
+  summary?: string | null;
+  data: Record<string, Json>;
 }
 
 export interface InventorySnapshot {

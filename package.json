@@ -1,13 +1,14 @@
 {
   "name": "@local/openclaw-supabase-bridge",
-  "version": "0.1.2",
-  "description": "Durable Supabase mailbox and run ledger channel for OpenClaw.",
+  "version": "0.2.0",
+  "description": "Supabase task mailbox, run ledger, and read-only OpenClaw operational control-plane uplink.",
   "type": "module",
   "private": true,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
     "dist/**",
+    "docs/**",
     "migrations/**",
     "README.md",
     "openclaw.plugin.json",
@@ -39,8 +40,8 @@
     "setupEntry": "./dist/setup-entry.js",
     "channel": {
       "id": "supabase-bridge",
-      "label": "Supabase Bridge",
-      "blurb": "Durable ChatGPT-to-OpenClaw task mailbox and run ledger."
+      "label": "Supabase Task Mailbox",
+      "blurb": "Durable Chatter-to-OpenClaw task mailbox with a read-only operational uplink."
     },
     "compat": {
       "pluginApi": ">=2026.7.1",

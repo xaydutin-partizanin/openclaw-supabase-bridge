@@ -24,6 +24,11 @@ function defaultWorkerId(): string {
   return `openclaw-${host || "local"}`;
 }
 
+function defaultInstanceKey(): string {
+  const host = os.hostname().toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "");
+  return `openclaw:${host || "local"}`;
+}
+
 export function resolvePluginConfig(cfg: OpenClawConfig): PluginConfig {
   const raw = readPluginConfig(cfg);
   const channel = readChannelConfig(cfg);
@@ -42,6 +47,9 @@ export function resolvePluginConfig(cfg: OpenClawConfig): PluginConfig {
     eventLoggingEnabled: asBoolean(raw.eventLoggingEnabled, true),
     eventMaxPayloadBytes: asBoundedInteger(raw.eventMaxPayloadBytes, 65_536, 1_024, 1_048_576),
     leaseDurationSeconds: asBoundedInteger(raw.leaseDurationSeconds, 900, 60, 86_400),
+    instanceKey: asString(raw.instanceKey)?.trim() || defaultInstanceKey(),
+    telemetryEnabled: asBoolean(raw.telemetryEnabled, true),
+    telemetryHeartbeatSeconds: asBoundedInteger(raw.telemetryHeartbeatSeconds, 60, 30, 300),
   };
 }
 

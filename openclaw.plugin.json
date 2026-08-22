@@ -1,7 +1,7 @@
 {
   "id": "supabase-bridge",
-  "name": "Supabase Bridge",
-  "description": "Durable Supabase mailbox, run ledger, event stream, and report channel for OpenClaw.",
+  "name": "Supabase Control Plane Bridge",
+  "description": "Durable Supabase task mailbox, run ledger, and read-only OpenClaw operational uplink.",
   "channels": ["supabase-bridge"],
   "activation": {
     "onStartup": true
@@ -24,10 +24,13 @@
       "supabaseUrl": { "type": "string", "minLength": 1 },
       "supabaseCredential": { "type": ["string", "object"] },
       "workerId": { "type": "string", "minLength": 1 },
+      "instanceKey": { "type": "string", "minLength": 1 },
       "quotaRefreshIntervalMinutes": { "type": "integer", "minimum": 1, "maximum": 1440, "default": 15 },
       "eventLoggingEnabled": { "type": "boolean", "default": true },
       "eventMaxPayloadBytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 65536 },
-      "leaseDurationSeconds": { "type": "integer", "minimum": 60, "maximum": 86400, "default": 900 }
+      "leaseDurationSeconds": { "type": "integer", "minimum": 60, "maximum": 86400, "default": 900 },
+      "telemetryEnabled": { "type": "boolean", "default": true },
+      "telemetryHeartbeatSeconds": { "type": "integer", "minimum": 30, "maximum": 300, "default": 60 }
     }
   },
   "channelConfigs": {

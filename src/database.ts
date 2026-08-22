@@ -5,11 +5,15 @@ import type {
   BridgeRun,
   BridgeTask,
   BridgeTaskStatus,
+  ExecutionTargetPlan,
   InventoryIds,
   InventorySnapshot,
   Json,
+  OperationalEventInput,
   QuotaStatus,
   ResolvedExecutionConfig,
+  TaskTargetRecord,
+  TelemetryWrite,
   TerminalWriteInput,
 } from "./types.js";
 
@@ -22,6 +26,7 @@ export interface StartRunInput {
   providerId: string | null;
   parentSessionKey: string;
   parentSessionId: string;
+  target: ExecutionTargetPlan;
   metadata: Record<string, Json>;
 }
 
@@ -40,6 +45,7 @@ export interface BridgeDatabase {
   refreshInventory(snapshot: InventorySnapshot): Promise<InventoryIds>;
   listReconciliationTasks(now: Date): Promise<BridgeTask[]>;
   getLatestRunForTask(taskId: string): Promise<BridgeRun | null>;
+  getTaskTarget(taskId: string): Promise<TaskTargetRecord | null>;
   claimTask(taskId: string, workerId: string, leaseSeconds: number): Promise<BridgeTask | null>;
   renewLease(taskId: string, workerId: string, leaseSeconds: number): Promise<boolean>;
   startRun(input: StartRunInput): Promise<BridgeRun>;
@@ -48,11 +54,85 @@ export interface BridgeDatabase {
   appendEvents(events: BridgeEvent[]): Promise<void>;
   writeTerminal(input: TerminalWriteInput): Promise<boolean>;
   upsertQuota(rows: QuotaStatus[]): Promise<void>;
+  writeTelemetry(writes: TelemetryWrite[]): Promise<void>;
+  appendOperationalEvents(events: OperationalEventInput[]): Promise<void>;
+  recordOperationalError(input: {
+    rollupKey: string;
+    instanceKey: string;
+    domain: string;
+    errorCode: string;
+    observedAt: string;
+    summary: string;
+    bootId: string;
+  }): Promise<void>;
   subscribeTasks(
     onNotification: (notification: RealtimeTaskNotification) => void,
     onHealth: (health: RealtimeHealth, detail?: string) => void,
   ): Promise<TaskSubscription>;
   close(): Promise<void>;
+}
+
+export function buildStartRunRpcParams(input: StartRunInput): Record<string, unknown> {
+  const selected = input.resolved.config;
+  return {
+    p_run_id: input.runId,
+    p_task_id: input.task.id,
+    p_worker_id: input.workerId,
+    p_requested_config: input.resolved.requestedConfig,
+    p_used_config: selected.configKey,
+    p_fallback_used: input.resolved.fallbackUsed,
+    p_fallback_reason: input.resolved.fallbackReason,
+    p_config_id: input.configId,
+    p_provider_id: input.providerId,
+    p_provider_key: selected.providerKey,
+    p_runtime: selected.runtime,
+    p_agent: selected.agent,
+    p_model: selected.model,
+    p_effort: selected.effort,
+    p_parent_session_key: input.parentSessionKey,
+    p_parent_session_id: input.parentSessionId,
+    p_requested_instance_key: input.target.requestedInstanceKey,
+    p_actual_instance_key: input.target.instanceKey,
+    p_requested_agent_id: input.target.requestedAgentId,
+    p_actual_agent_id: input.target.agentId,
+    p_session_policy: input.target.sessionPolicy,
+    p_source_session_key: input.target.sourceSessionKey,
+    p_source_session_id: input.target.sourceSessionId,
+    p_actual_session_key: input.target.actualSessionKey,
+    p_actual_session_id: input.target.actualSessionId,
+    p_project_key: input.target.projectKey,
+    p_project_path: input.target.projectPath,
+    p_workspace_key: input.target.workspaceKey,
+    p_workspace_path: input.target.workspacePath,
+    p_worktree_key: input.target.worktreeKey,
+    p_worktree_path: input.target.worktreePath,
+    p_busy_policy: input.target.busyPolicy,
+    p_metadata: input.metadata,
+  };
+}
+
+function mapTaskTarget(value: unknown): TaskTargetRecord {
+  const row = asRecord(value);
+  const sessionPolicy = asString(row.session_policy);
+  const busyPolicy = asString(row.busy_policy);
+  return {
+    taskId: String(row.task_id),
+    instanceKey: asString(row.instance_key),
+    agentId: asString(row.agent_id),
+    sessionPolicy: sessionPolicy === "continue" || sessionPolicy === "fork" ? sessionPolicy : "new",
+    sessionKey: asString(row.session_key),
+    sessionId: asString(row.session_id),
+    projectKey: asString(row.project_key),
+    projectPath: asString(row.project_path),
+    workspaceKey: asString(row.workspace_key),
+    workspacePath: asString(row.workspace_path),
+    worktreeKey: asString(row.worktree_key),
+    worktreePath: asString(row.worktree_path),
+    nodeKey: asString(row.node_key),
+    nodeId: asString(row.node_id),
+    busyPolicy: busyPolicy === "reject" ? "reject" : "queue",
+    metadata: toJson(asRecord(row.metadata)) as Record<string, Json>,
+  };
 }
 
 function unwrapRow(data: unknown): Record<string, unknown> | null {
@@ -116,7 +196,7 @@ export class SupabaseBridgeDatabase implements BridgeDatabase {
   constructor(url: string, credential: string) {
     this.#client = createClient(url, credential, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-      global: { headers: { "X-Client-Info": "openclaw-supabase-bridge/0.1.2" } },
+      global: { headers: { "X-Client-Info": "openclaw-supabase-bridge/0.2.0" } },
       realtime: { params: { eventsPerSecond: 5 } },
     });
   }
@@ -218,6 +298,16 @@ export class SupabaseBridgeDatabase implements BridgeDatabase {
     return data ? mapRun(data) : null;
   }
 
+  async getTaskTarget(taskId: string): Promise<TaskTargetRecord | null> {
+    const { data, error } = await this.#client
+      .from("task_targets")
+      .select("*")
+      .eq("task_id", taskId)
+      .maybeSingle();
+    if (error) throwDatabaseError("read task target", error);
+    return data ? mapTaskTarget(data) : null;
+  }
+
   async claimTask(taskId: string, workerId: string, leaseSeconds: number): Promise<BridgeTask | null> {
     const { data, error } = await this.#client.rpc("claim_bridge_task", {
       p_task_id: taskId,
@@ -240,26 +330,7 @@ export class SupabaseBridgeDatabase implements BridgeDatabase {
   }
 
   async startRun(input: StartRunInput): Promise<BridgeRun> {
-    const selected = input.resolved.config;
-    const { data, error } = await this.#client.rpc("start_bridge_run", {
-      p_run_id: input.runId,
-      p_task_id: input.task.id,
-      p_worker_id: input.workerId,
-      p_requested_config: input.resolved.requestedConfig,
-      p_used_config: selected.configKey,
-      p_fallback_used: input.resolved.fallbackUsed,
-      p_fallback_reason: input.resolved.fallbackReason,
-      p_config_id: input.configId,
-      p_provider_id: input.providerId,
-      p_provider_key: selected.providerKey,
-      p_runtime: selected.runtime,
-      p_agent: selected.agent,
-      p_model: selected.model,
-      p_effort: selected.effort,
-      p_parent_session_key: input.parentSessionKey,
-      p_parent_session_id: input.parentSessionId,
-      p_metadata: input.metadata,
-    });
+    const { data, error } = await this.#client.rpc("start_bridge_run_v2", buildStartRunRpcParams(input));
     if (error) throwDatabaseError("start bridge run", error);
     const row = unwrapRow(data);
     if (!row) throw new Error("start bridge run returned no row");
@@ -366,6 +437,66 @@ export class SupabaseBridgeDatabase implements BridgeDatabase {
       onConflict: "quota_identity",
     });
     if (error) throwDatabaseError("upsert quota status", error);
+  }
+
+  async writeTelemetry(writes: TelemetryWrite[]): Promise<void> {
+    for (const batch of writes) {
+      if (!batch.rows.length) continue;
+      const payload = batch.rows.map((row) => Object.fromEntries(
+        Object.entries(row).filter(([, value]) => value !== undefined),
+      ));
+      const { error } = await this.#client.from(batch.table).upsert(payload, {
+        onConflict: batch.onConflict,
+      });
+      if (error) throwDatabaseError(`upsert telemetry ${batch.table}`, error);
+    }
+  }
+
+  async appendOperationalEvents(events: OperationalEventInput[]): Promise<void> {
+    if (!events.length) return;
+    const payload = events.map((event) => ({
+      event_key: event.eventKey,
+      instance_key: event.instanceKey,
+      boot_id: event.bootId,
+      source: event.source,
+      domain: event.domain,
+      severity: event.severity,
+      event_type: event.eventType,
+      event_ts: event.eventTs,
+      agent_id: event.agentId ?? null,
+      session_key: event.sessionKey ?? null,
+      session_id: event.sessionId ?? null,
+      run_id: event.runId ?? null,
+      bridge_task_id: event.taskId ?? null,
+      summary: event.summary ?? null,
+      data: event.data,
+    }));
+    const { error } = await this.#client.from("operational_events").upsert(payload, {
+      onConflict: "event_key",
+      ignoreDuplicates: true,
+    });
+    if (error) throwDatabaseError("append operational events", error);
+  }
+
+  async recordOperationalError(input: {
+    rollupKey: string;
+    instanceKey: string;
+    domain: string;
+    errorCode: string;
+    observedAt: string;
+    summary: string;
+    bootId: string;
+  }): Promise<void> {
+    const { error } = await this.#client.rpc("record_bridge_error_rollup", {
+      p_rollup_key: input.rollupKey,
+      p_instance_key: input.instanceKey,
+      p_domain: input.domain,
+      p_error_code: input.errorCode,
+      p_observed_at: input.observedAt,
+      p_sample_summary: input.summary,
+      p_boot_id: input.bootId,
+    });
+    if (error) throwDatabaseError("record operational error rollup", error);
   }
 
   async subscribeTasks(

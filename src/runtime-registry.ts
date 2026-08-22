@@ -61,6 +61,18 @@ export async function handleBridgeAgentEvent(event: OpenClawAgentEvent): Promise
   await Promise.all([...controllers.values()].map(async (controller) => controller.handleAgentEvent(event)));
 }
 
+export async function handleBridgeHook(name: string, event: unknown, context?: unknown): Promise<void> {
+  await Promise.all([...controllers.values()].map(async (controller) => controller.handleHook(name, event, context)));
+}
+
+export function bridgeRuntimeSnapshot(): { accountIds: string[]; controllerCount: number; eventOwnerCount: number } {
+  return {
+    accountIds: [...controllers.keys()],
+    controllerCount: controllers.size,
+    eventOwnerCount: pluginApi ? 1 : 0,
+  };
+}
+
 export async function deliverBridgeOutbound(target: string, text: string): Promise<string> {
   for (const controller of controllers.values()) {
     if (controller.started) return controller.recordOutbound(target, text);
