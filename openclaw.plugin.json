@@ -1,0 +1,45 @@
+{
+  "id": "supabase-bridge",
+  "name": "Supabase Bridge",
+  "description": "Durable Supabase mailbox, run ledger, event stream, and report channel for OpenClaw.",
+  "channels": ["supabase-bridge"],
+  "activation": {
+    "onStartup": true
+  },
+  "configContracts": {
+    "secretInputs": {
+      "paths": [
+        {
+          "path": "supabaseCredential",
+          "expected": "string"
+        }
+      ]
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean", "default": false },
+      "supabaseUrl": { "type": "string", "minLength": 1 },
+      "supabaseCredential": { "type": ["string", "object"] },
+      "workerId": { "type": "string", "minLength": 1 },
+      "quotaRefreshIntervalMinutes": { "type": "integer", "minimum": 1, "maximum": 1440, "default": 15 },
+      "eventLoggingEnabled": { "type": "boolean", "default": true },
+      "eventMaxPayloadBytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 65536 },
+      "leaseDurationSeconds": { "type": "integer", "minimum": 60, "maximum": 86400, "default": 900 }
+    }
+  },
+  "channelConfigs": {
+    "supabase-bridge": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false }
+        }
+      },
+      "uiHints": {}
+    }
+  }
+}

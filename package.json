@@ -1,0 +1,63 @@
+{
+  "name": "@local/openclaw-supabase-bridge",
+  "version": "0.1.2",
+  "description": "Durable Supabase mailbox and run ledger channel for OpenClaw.",
+  "type": "module",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/**",
+    "migrations/**",
+    "README.md",
+    "openclaw.plugin.json",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "validate": "npm run typecheck && npm run test && npm run build",
+    "prepack": "npm run validate"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "setupEntry": "./dist/setup-entry.js",
+    "channel": {
+      "id": "supabase-bridge",
+      "label": "Supabase Bridge",
+      "blurb": "Durable ChatGPT-to-OpenClaw task mailbox and run ledger."
+    },
+    "compat": {
+      "pluginApi": ">=2026.7.1",
+      "minGatewayVersion": ">=2026.7.1"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1-2",
+      "pluginSdkVersion": "2026.7.1-2"
+    }
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.112.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "openclaw": "2026.7.1-2",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}
