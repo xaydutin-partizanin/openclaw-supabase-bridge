@@ -237,13 +237,34 @@ describe("cursor auth resolution", () => {
     expect(rows[0]).toMatchObject({ status: "error", remaining: null, other: { reason: "cursor_rpc_network_error" } });
   });
 
-  it("exchanges user API keys through the documented auth endpoint shape", async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      expect(String(input)).toContain("/auth/exchange_user_api_key");
+  it("exchanges user API keys via Authorization Bearer and empty JSON body", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://api2.cursor.sh/auth/exchange_user_api_key");
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBe("{}");
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer key_ok");
+      expect(headers["Content-Type"]).toBe("application/json");
+      expect(headers.Accept).toBe("application/json");
+      expect(JSON.stringify(init)).not.toContain("userApiKey");
       return new Response(JSON.stringify({ accessToken: "short-lived" }), { status: 200 });
     }) as unknown as typeof fetch;
     const result = await exchangeUserApiKey("key_ok", fetchImpl);
     expect(result).toMatchObject({ ok: true, source: "user_api_key_exchange" });
+    if (result.ok) expect(result.accessToken).toBe("short-lived");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not put the user API key into the JSON body", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.body).toBe("{}");
+      expect(String(init?.body)).not.toContain("secret-key-value");
+      return new Response(JSON.stringify({ message: "Invalid User API Key" }), { status: 401 });
+    });
+    const result = await exchangeUserApiKey("secret-key-value", fetchMock as unknown as typeof fetch);
+    expect(result.ok).toBe(false);
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer secret-key-value");
   });
 });
 

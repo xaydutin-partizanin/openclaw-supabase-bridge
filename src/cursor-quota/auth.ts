@@ -81,13 +81,17 @@ export async function exchangeUserApiKey(
   fetchImpl: typeof fetch = fetch,
 ): Promise<CursorAccessTokenResult> {
   try {
+    // Cursor's undocumented exchange endpoint expects the User API Key
+    // (typically `crsr_…`) as Authorization Bearer with an empty JSON object body.
+    // Community CLI/SDK clients use this shape; a JSON `{ userApiKey }` body is not the accepted form.
     const response = await fetchImpl(EXCHANGE_URL, {
       method: "POST",
       headers: {
+        Authorization: `Bearer ${userApiKey}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({ userApiKey }),
+      body: "{}",
     });
     const text = await response.text();
     let body: unknown = null;
@@ -101,7 +105,8 @@ export async function exchangeUserApiKey(
         body && typeof body === "object" && typeof (body as { message?: unknown }).message === "string"
           ? (body as { message: string }).message
           : `http_${response.status}`;
-      return { ok: false, reason: "user_api_key_exchange_failed", detail: message.slice(0, 200) };
+      const safe = message.replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]").slice(0, 200);
+      return { ok: false, reason: "user_api_key_exchange_failed", detail: safe };
     }
     const token =
       body && typeof body === "object"

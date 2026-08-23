@@ -103,7 +103,7 @@ Quota refresh runs at startup, periodically (15 minutes by default), after every
 
 - OpenAI: OpenClaw’s public Codex/OpenAI usage adapter is queried. Provider-reported used percentages are represented as honest percentage buckets with reset times.
 - DeepSeek: OpenClaw’s public DeepSeek usage adapter is queried. Balances/budgets are represented in their provider units.
-- Cursor: when a local Cursor login or optional `cursorUserApiKey` SecretRef is available, the bridge calls Cursor’s authenticated internal DashboardService (`GetCurrentPeriodUsage` / `GetPlanInfo`) and stores Cursor Models / Other Models / total percent windows plus included allowance cents. Source is recorded as `cursor_internal_api` (undocumented provider interface — not a public billing API). Generic ACP/session token counters are never treated as Cursor quota. If no auth source exists, Cursor remains `unsupported`.
+- Cursor: when a local Cursor login or optional `cursorUserApiKey` SecretRef is available, the bridge calls Cursor’s authenticated internal DashboardService (`GetCurrentPeriodUsage` / `GetPlanInfo`) and stores Cursor Models / Other Models / total percent windows plus included allowance cents. Source is recorded as `cursor_internal_api` (undocumented provider interface — not a public billing API). Optional User API Keys are exchanged via `POST /auth/exchange_user_api_key` with `Authorization: Bearer <key>` and body `{}` (not a JSON `userApiKey` field). Generic ACP/session token counters are never treated as Cursor quota. If no auth source exists, Cursor remains `unsupported`.
 - Unknown providers: `UNSUPPORTED` or `UNKNOWN`; no allowance is invented.
 
 Quota errors never stop task execution.
