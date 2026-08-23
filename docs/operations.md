@@ -18,11 +18,11 @@ Freshness is not a cached green badge. Collectors write `source_observed_at`, `i
 1. Keep the live v0.1.2 package running.
 2. Apply `migrations/202608220002_openclaw_control_plane_uplink.sql` to the intended Supabase project.
 3. Run `docs/security-advisor-checklist.md`.
-4. Build/package v0.2.0 with `npm install`, `npm run validate`, and `npm pack`.
-5. Install `npm-pack:.\local-openclaw-supabase-bridge-0.2.0.tgz`, enable the plugin, and restart the Gateway.
+4. Build/package v0.2.1 with `npm install`, `npm run validate`, and `npm pack`.
+5. Install `npm-pack:.\local-openclaw-supabase-bridge-0.2.1.tgz`, enable the plugin, and restart the Gateway.
 6. Verify `openclaw plugins inspect supabase-bridge --runtime --json` and `openclaw channels status --deep`.
 7. Query `v_bridge_health`, `v_system_overview`, and `v_execution_targets`; confirm one worker/account.
-8. Submit harmless legacy, new, continue, and fork tasks using `docs/task-targeting.md`.
+8. Submit harmless legacy, new, and continue tasks using `docs/task-targeting.md`; confirm fork/worktree targets fail with their documented unsupported codes.
 
 ## Recovery
 
@@ -30,4 +30,4 @@ Realtime is notification-only; Postgres claims/leases are durable truth. Reconne
 
 ## Rollback
 
-Disable/uninstall v0.2.0, reinstall the known v0.1.2 package, and restart OpenClaw. The additive schema may remain: v0.1.2 ignores it. Do not reverse or edit the already-applied v0.1 migration. Database history is intentionally retained unless an operator separately designs a destructive data-retention action.
+Disable/uninstall v0.2.x, reinstall the known v0.1.2 package, and restart OpenClaw. The additive schema may remain: v0.1.2 ignores it. Do not reverse or edit the already-applied v0.1 migration. Database history is intentionally retained unless an operator separately designs a destructive data-retention action.

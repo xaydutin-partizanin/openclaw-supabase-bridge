@@ -34,7 +34,7 @@ No target row means v0.1 behavior: a clean bridge session and the existing reque
 }
 ```
 
-The bridge resolves both identifiers, requires them to name the same current session, verifies current activity through `sessions.list`, and fails closed on missing/stale/mismatched identity.
+The bridge resolves both identifiers from the public metadata-only `runtime.agent.session.listSessionEntries` surface, requires them to name the same current session, verifies persisted activity state, and fails closed on missing/stale/mismatched identity.
 
 ## Fork an exact session
 
@@ -48,9 +48,9 @@ The bridge resolves both identifiers, requires them to name the same current ses
 }
 ```
 
-Fork uses public `sessions.create` with the exact parent key and `fork: true`. Source and resulting session IDs are recorded in `runs` and later mirrored in `session_relations`.
+On OpenClaw 2026.7.1-2, `sessions.create` and the atomic transcript-fork implementation are trusted Gateway operations rather than external-plugin APIs. The bridge therefore rejects this target with `session_fork_unsupported`; it does not fake a fork, patch core, or copy private transcripts.
 
-## Project/workspace/worktree
+## Project/workspace (managed worktrees unsupported)
 
 Choose keys and paths from `v_execution_targets`:
 
@@ -63,13 +63,11 @@ Choose keys and paths from `v_execution_targets`:
   "project_path":"F:\\RGAT-development",
   "workspace_key":"<workspace-key>",
   "workspace_path":"F:\\RGAT-development",
-  "worktree_key":"<worktree-key>",
-  "worktree_path":"F:\\RGAT-development\\.openclaw-worktrees\\<id>",
   "busy_policy":"queue"
 }
 ```
 
-Keys and paths are cross-checked against `agents.list` and `worktrees.list`. This build exposes node inventory but no public embedded-agent node-placement argument, so `node_key`/`node_id` currently fail with `node_target_unsupported` rather than pretending placement worked.
+Configured project/workspace keys and paths are cross-checked against `runtime.agent.resolveAgentWorkspaceDir` and the resolved agent config. This build does not expose managed-worktree inventory to external plugins, so `worktree_key`/`worktree_path` fail with `worktree_inventory_unsupported`. It exposes node inventory but no public embedded-agent node-placement argument, so `node_key`/`node_id` fail with `node_target_unsupported`.
 
 `queue` retains the exact busy session and lets OpenClaw serialize it. `reject` fails before execution. There is no preemption or unrelated-run cancellation.
 

@@ -1,41 +1,12 @@
-import { asBoolean, asRecord, asString } from "../../object-utils.js";
+import { asRecord, asString } from "../../object-utils.js";
+import { discoverInventory } from "../../inventory.js";
 import type { TelemetryRow } from "../../types.js";
-import { json, nullableString, observedRow, rows, stableKey, write } from "../collector-utils.js";
+import { json, nullableString, observedRow, stableKey, write } from "../collector-utils.js";
+import { listConfiguredAgents, listConfiguredModelRefs } from "../public-runtime.js";
 import type { CollectorContext, CollectorResult, TelemetryCollector } from "../types.js";
+import { unsupportedCollectorResult } from "../unsupported.js";
 
 const MINUTE = 60_000;
-
-async function request(context: CollectorContext, method: string, params?: Record<string, unknown>): Promise<unknown> {
-  return context.api.runtime.gateway.request(method, params);
-}
-
-function modelRows(context: CollectorContext, result: Record<string, unknown>, observedAt: string, staleAfterMs: number): TelemetryRow[] {
-  return rows(result, "models").flatMap((model): TelemetryRow[] => {
-    const provider = asString(model.provider) ?? asString(model.providerId);
-    const id = asString(model.id) ?? asString(model.model);
-    if (!provider || !id) return [];
-    return [observedRow({
-      row: {
-        model_key: stableKey(context.instanceKey, provider, id),
-        instance_key: context.instanceKey,
-        provider_key: provider,
-        model_id: id,
-        display_name: nullableString(model.name) ?? id,
-        available: model.available === undefined ? true : asBoolean(model.available, false),
-        context_tokens: typeof model.contextTokens === "number" ? model.contextTokens : null,
-        input_modalities: json(model.input ?? model.modalities ?? []),
-        capabilities: json({
-          reasoning: model.reasoning,
-          tools: model.tools,
-          vision: model.vision,
-        }),
-      },
-      observedAt,
-      staleAfterMs,
-      bootId: context.bootId,
-    })];
-  });
-}
 
 export const modelsCollector: TelemetryCollector = {
   id: "models",
@@ -45,75 +16,73 @@ export const modelsCollector: TelemetryCollector = {
   staleAfterMs: 30 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    const [modelValue, authValue, agentValue] = await Promise.all([
-      request(context, "models.list"),
-      request(context, "models.authStatus"),
-      request(context, "agents.list"),
-    ]);
-    const models = asRecord(modelValue);
-    const auth = asRecord(authValue);
-    const agents = asRecord(agentValue);
     const observedAt = context.now.toISOString();
-    const mappedModels = modelRows(context, models, observedAt, this.staleAfterMs);
-    const authRows: TelemetryRow[] = [];
-    const providerValues = Array.isArray(auth.providers) ? auth.providers : [];
-    for (const providerValue of providerValues) {
-      const provider = asRecord(providerValue);
-      const id = asString(provider.provider) ?? asString(provider.id);
-      if (!id) continue;
-      authRows.push(observedRow({
-        row: {
-          auth_key: stableKey(context.instanceKey, id),
-          instance_key: context.instanceKey,
-          provider_key: id,
-          status: nullableString(provider.status) ?? "unknown",
-          profile_count: Array.isArray(provider.profiles) ? provider.profiles.length : null,
-          expires_at: typeof provider.expiresAt === "number" ? new Date(provider.expiresAt).toISOString() : null,
-          secret_material_excluded: true,
-          metadata: {},
-        },
-        observedAt,
-        staleAfterMs: this.staleAfterMs,
-        bootId: context.bootId,
-      }));
-    }
-
-    const harnessRows = rows(agents, "agents").flatMap((agent): TelemetryRow[] => {
-      const agentId = asString(agent.id);
-      if (!agentId) return [];
-      const runtime = asRecord(agent.agentRuntime);
-      const runtimeId = asString(runtime.id) ?? "native";
+    const inventory = await discoverInventory(context.api, context.cfg);
+    const availability = new Map(inventory.providers.map((provider) => [provider.providerKey, provider]));
+    const mappedModels = listConfiguredModelRefs(context.cfg).flatMap((modelRef): TelemetryRow[] => {
+      const separator = modelRef.indexOf("/");
+      if (separator < 1) return [];
+      const provider = modelRef.slice(0, separator);
+      const id = modelRef.slice(separator + 1);
       return [observedRow({
         row: {
-          harness_key: stableKey(context.instanceKey, agentId, runtimeId),
+          model_key: stableKey(context.instanceKey, provider, id),
           instance_key: context.instanceKey,
-          agent_id: agentId,
-          harness_id: runtimeId,
-          source: nullableString(runtime.source),
-          available: true,
-          metadata: {},
+          provider_key: provider,
+          model_id: id,
+          display_name: id,
+          available: availability.get(provider)?.available === true,
+          context_tokens: null,
+          input_modalities: [],
+          capabilities: { source: "configured_model_allowlist" },
         },
         observedAt,
         staleAfterMs: this.staleAfterMs,
         bootId: context.bootId,
       })];
     });
+    const authRows = inventory.providers.map((provider): TelemetryRow => observedRow({
+      row: {
+        auth_key: stableKey(context.instanceKey, provider.providerKey),
+        instance_key: context.instanceKey,
+        provider_key: provider.providerKey,
+        status: provider.available ? "available" : "unavailable",
+        profile_count: null,
+        expires_at: null,
+        secret_material_excluded: true,
+        metadata: provider.metadata,
+      },
+      observedAt,
+      staleAfterMs: this.staleAfterMs,
+      bootId: context.bootId,
+    }));
 
-    const cfg = asRecord(context.cfg);
-    const configuredAgents = Array.isArray(asRecord(cfg.agents).list) ? asRecord(cfg.agents).list as unknown[] : [];
-    const acpRows = configuredAgents.flatMap((value): TelemetryRow[] => {
-      const agent = asRecord(value);
-      const id = asString(agent.id);
-      const runtime = asRecord(agent.runtime);
-      const acp = asRecord(runtime.acp);
-      if (!id || asString(runtime.type) !== "acp") return [];
+    const configuredAgents = listConfiguredAgents(context.api, context.cfg);
+    const harnessRows = configuredAgents.map((agent): TelemetryRow => observedRow({
+        row: {
+          harness_key: stableKey(context.instanceKey, agent.id, agent.runtimeId),
+          instance_key: context.instanceKey,
+          agent_id: agent.id,
+          harness_id: agent.runtimeId,
+          source: agent.runtimeSource,
+          available: true,
+          metadata: { availability_source: "configured_agent" },
+        },
+        observedAt,
+        staleAfterMs: this.staleAfterMs,
+        bootId: context.bootId,
+      }));
+
+    const acpRows = configuredAgents.flatMap((agent): TelemetryRow[] => {
+      if (agent.runtimeId !== "acp") return [];
+      const acp = asRecord(agent.runtimeConfig.acp);
       const backend = asString(acp.backend) ?? "unknown";
       return [observedRow({
         row: {
-          backend_key: stableKey(context.instanceKey, backend, id),
+          backend_key: stableKey(context.instanceKey, backend, agent.id),
           instance_key: context.instanceKey,
           backend_id: backend,
-          agent_id: id,
+          agent_id: agent.id,
           harness_agent: nullableString(acp.agent),
           mode: nullableString(acp.mode),
           cwd: nullableString(acp.cwd),
@@ -129,7 +98,7 @@ export const modelsCollector: TelemetryCollector = {
       })];
     });
     return {
-      authority: "gateway_rpc:models.list+models.authStatus+agents.list",
+      authority: "plugin_runtime:modelAuth+thinkingPolicy+config_snapshot",
       observedAt,
       writes: [
         write("models", "model_key", mappedModels),
@@ -149,60 +118,12 @@ export const toolsCollector: TelemetryCollector = {
   staleAfterMs: 60 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    const [catalogValue, agentsValue] = await Promise.all([
-      request(context, "tools.catalog"),
-      request(context, "agents.list"),
-    ]);
-    const catalog = asRecord(catalogValue);
-    const agents = rows(asRecord(agentsValue), "agents");
-    const observedAt = context.now.toISOString();
-    const tools = rows(catalog, "tools");
-    const toolRows: TelemetryRow[] = [];
-    const agentToolRows: TelemetryRow[] = [];
-    for (const tool of tools) {
-      const name = asString(tool.name);
-      if (!name) continue;
-      const pluginId = asString(tool.pluginId) ?? asString(tool.owner) ?? "core";
-      const toolKey = stableKey(context.instanceKey, pluginId, name);
-      toolRows.push(observedRow({
-        row: {
-          tool_key: toolKey,
-          instance_key: context.instanceKey,
-          tool_name: name,
-          plugin_id: pluginId,
-          display_name: nullableString(tool.displayName),
-          description: nullableString(tool.description),
-          risk: nullableString(tool.risk),
-          available: tool.available === undefined ? true : asBoolean(tool.available, false),
-          metadata: json({ tags: tool.tags ?? [] }),
-        },
-        observedAt,
-        staleAfterMs: this.staleAfterMs,
-        bootId: context.bootId,
-      }));
-      for (const agent of agents) {
-        const agentId = asString(agent.id);
-        if (!agentId) continue;
-        agentToolRows.push(observedRow({
-          row: {
-            agent_tool_key: stableKey(context.instanceKey, agentId, toolKey),
-            instance_key: context.instanceKey,
-            agent_id: agentId,
-            tool_key: toolKey,
-            enabled: true,
-            authority: "catalog-visible; effective policy may narrow at run time",
-          },
-          observedAt,
-          staleAfterMs: this.staleAfterMs,
-          bootId: context.bootId,
-        }));
-      }
-    }
-    return {
-      authority: "gateway_rpc:tools.catalog",
-      observedAt,
-      writes: [write("tools", "tool_key", toolRows), write("agent_tools", "agent_tool_key", agentToolRows)],
-    };
+    return unsupportedCollectorResult({
+      context,
+      domain: "tools-catalog-and-effective-agent-tools",
+      reason: "OpenClaw 2026.7.1-2 exposes tools.catalog/tools.effective only through trusted Gateway requests; no equivalent external-plugin read helper exists.",
+      staleAfterMs: this.staleAfterMs,
+    });
   },
 };
 
@@ -214,65 +135,12 @@ export const skillsCollector: TelemetryCollector = {
   staleAfterMs: 60 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    const agents = rows(asRecord(await request(context, "agents.list")), "agents");
-    const observedAt = context.now.toISOString();
-    const skillMap = new Map<string, TelemetryRow>();
-    const agentSkillRows: TelemetryRow[] = [];
-    for (const agent of agents) {
-      const agentId = asString(agent.id);
-      if (!agentId) continue;
-      const status = asRecord(await request(context, "skills.status", { agentId }));
-      for (const skill of rows(status, "skills")) {
-        const name = asString(skill.name) ?? asString(skill.skillKey);
-        if (!name) continue;
-        const source = asString(skill.source) ?? "unknown";
-        const skillKey = stableKey(context.instanceKey, source, name);
-        skillMap.set(skillKey, observedRow({
-          row: {
-            skill_key: skillKey,
-            instance_key: context.instanceKey,
-            skill_name: name,
-            source,
-            bundled: asBoolean(skill.bundled, false),
-            eligible: asBoolean(skill.eligible, false),
-            disabled: asBoolean(skill.disabled, false),
-            user_invocable: asBoolean(skill.userInvocable, false),
-            command_visible: asBoolean(skill.commandVisible, false),
-            file_path: nullableString(skill.filePath),
-            requirements: json({
-              bins: asRecord(skill.requirements).bins ?? [],
-              config: asRecord(skill.requirements).config ?? [],
-              os: asRecord(skill.requirements).os ?? [],
-              environment_names_excluded: true,
-            }),
-          },
-          observedAt,
-          staleAfterMs: this.staleAfterMs,
-          bootId: context.bootId,
-        }));
-        agentSkillRows.push(observedRow({
-          row: {
-            agent_skill_key: stableKey(context.instanceKey, agentId, skillKey),
-            instance_key: context.instanceKey,
-            agent_id: agentId,
-            skill_key: skillKey,
-            eligible: asBoolean(skill.eligible, false),
-            enabled: !asBoolean(skill.disabled, false),
-          },
-          observedAt,
-          staleAfterMs: this.staleAfterMs,
-          bootId: context.bootId,
-        }));
-      }
-    }
-    return {
-      authority: "gateway_rpc:skills.status",
-      observedAt,
-      writes: [
-        write("skills", "skill_key", [...skillMap.values()]),
-        write("agent_skills", "agent_skill_key", agentSkillRows),
-      ],
-    };
+    return unsupportedCollectorResult({
+      context,
+      domain: "skills-catalog-and-agent-eligibility",
+      reason: "OpenClaw 2026.7.1-2 exposes skills.status only through trusted Gateway requests; session snapshots are incomplete and are not a supported global skills inventory.",
+      staleAfterMs: this.staleAfterMs,
+    });
   },
 };
 

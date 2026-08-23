@@ -1,6 +1,6 @@
 {
   "name": "@local/openclaw-supabase-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Supabase task mailbox, run ledger, and read-only OpenClaw operational control-plane uplink.",
   "type": "module",
   "private": true,

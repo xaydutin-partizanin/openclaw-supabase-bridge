@@ -21,23 +21,25 @@ describe("safe session and task mirrors", () => {
   it("mirrors identity, activity, labels, and relationships without transcript bodies", async () => {
     const api = {
       runtime: {
-        gateway: {
-          request: vi.fn(async () => ({
-            sessions: [{
-              key: "agent:main:child",
+        gateway: { request: vi.fn() },
+        agent: {
+          session: {
+            listSessionEntries: () => [{
+              sessionKey: "agent:main:child",
+              entry: {
               sessionId: "session-id",
-              agentId: "main",
               label: "Safe label",
               displayName: "Safe display",
               parentSessionKey: "agent:main:parent",
-              hasActiveRun: true,
-              runId: "run-id",
+              status: "running",
+              restartRecoveryDeliveryRunId: "run-id",
               updatedAt: NOW.getTime(),
               prompt: "UNRELATED SECRET PROMPT",
               transcript: [{ role: "assistant", content: "UNRELATED SECRET REPLY" }],
               messages: ["UNRELATED SECRET MESSAGE"],
+              },
             }],
-          })),
+          },
         },
       },
     };
@@ -49,6 +51,7 @@ describe("safe session and task mirrors", () => {
     expect(serialized).not.toContain("UNRELATED SECRET");
     expect(result.activity).toBe("active");
     expect(result.writes.find((item) => item.table === "session_active_runs")?.rows).toHaveLength(1);
+    expect(api.runtime.gateway.request).not.toHaveBeenCalled();
   });
 
   it("mirrors OpenClaw task/flow correlation without task prompt bodies", async () => {

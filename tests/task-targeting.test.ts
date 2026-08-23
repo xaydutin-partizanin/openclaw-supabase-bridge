@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { ExactTargetError, legacyTaskTarget, resolveExecutionTarget, type TargetingGateway } from "../src/task-targeting.js";
+import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+import { legacyTaskTarget, resolveExecutionTarget } from "../src/task-targeting.js";
 import type { TaskTargetRecord } from "../src/types.js";
 import { configs } from "./fixtures.js";
 
@@ -7,10 +8,11 @@ const TASK_ID = "00000000-0000-4000-8000-000000000001";
 const INSTANCE = "openclaw:test-host";
 const MAIN_WORKSPACE = "F:\\RGAT-development";
 const SESSION = {
-  key: "agent:main:existing",
-  sessionId: "30000000-0000-4000-8000-000000000001",
-  agentId: "main",
-  hasActiveRun: false,
+  sessionKey: "agent:main:existing",
+  entry: {
+    sessionId: "30000000-0000-4000-8000-000000000001",
+    status: "done",
+  },
 };
 
 function target(overrides: Partial<TaskTargetRecord> = {}): TaskTargetRecord {
@@ -22,26 +24,33 @@ function target(overrides: Partial<TaskTargetRecord> = {}): TaskTargetRecord {
   };
 }
 
-function gateway(overrides: { session?: typeof SESSION; worktrees?: unknown[] } = {}): { request: ReturnType<typeof vi.fn> } {
-  const session = overrides.session ?? SESSION;
-  const worktrees = overrides.worktrees ?? [{ id: "wt-1", path: "F:\\RGAT-development\\.worktrees\\one", repoRoot: MAIN_WORKSPACE, agentId: "main" }];
-  const request = vi.fn(async (method: string, params?: Record<string, unknown>) => {
-    if (method === "agents.list") return { agents: [{ id: "main", workspace: MAIN_WORKSPACE }] };
-    if (method === "worktrees.list") return { worktrees };
-    if (method === "sessions.resolve") {
-      if (params?.key === "missing" || params?.sessionId === "missing") return { ok: false };
-      return { ok: true, session };
-    }
-    if (method === "sessions.list") return { sessions: [session] };
-    if (method === "sessions.create") return { key: "agent:main:supabase-bridge:fork", sessionId: "fork-id" };
-    throw new Error(`Unexpected RPC ${method}`);
-  });
-  return { request };
+function host(input: { sessions?: unknown[]; agents?: unknown[] } = {}) {
+  const sessions = input.sessions ?? [SESSION];
+  const agents = input.agents ?? [{ id: "main", workspace: MAIN_WORKSPACE }];
+  const listSessionEntries = vi.fn(() => sessions);
+  const resolveAgentWorkspaceDir = vi.fn(() => MAIN_WORKSPACE);
+  const api = {
+    runtime: {
+      agent: {
+        resolveAgentWorkspaceDir,
+        resolveAgentIdentity: vi.fn(() => undefined),
+        session: { listSessionEntries },
+      },
+    },
+  } as unknown as OpenClawPluginApi;
+  const cfg = {
+    agents: {
+      defaults: { workspace: MAIN_WORKSPACE },
+      list: agents,
+    },
+  } as OpenClawConfig;
+  return { api, cfg, listSessionEntries, resolveAgentWorkspaceDir };
 }
 
-async function resolve(inputTarget: TaskTargetRecord | null, gw = gateway()) {
+async function resolve(inputTarget: TaskTargetRecord | null, runtime = host()) {
   return resolveExecutionTarget({
-    gateway: gw as unknown as TargetingGateway,
+    api: runtime.api,
+    cfg: runtime.cfg,
     target: inputTarget,
     taskId: TASK_ID,
     instanceKey: INSTANCE,
@@ -51,10 +60,10 @@ async function resolve(inputTarget: TaskTargetRecord | null, gw = gateway()) {
   });
 }
 
-describe("exact task targeting", () => {
-  it("preserves legacy isolated-session behavior without inventory RPCs", async () => {
-    const gw = gateway();
-    const result = await resolve(null, gw);
+describe("exact task targeting through public plugin runtime surfaces", () => {
+  it("preserves legacy isolated-session behavior without inventory reads", async () => {
+    const runtime = host();
+    const result = await resolve(null, runtime);
     expect(result).toMatchObject({
       legacy: true,
       requestedInstanceKey: null,
@@ -64,47 +73,51 @@ describe("exact task targeting", () => {
       actualSessionId: "new-session-id",
       cwd: MAIN_WORKSPACE,
     });
-    expect(gw.request).not.toHaveBeenCalled();
+    expect(runtime.listSessionEntries).not.toHaveBeenCalled();
+    expect(runtime.resolveAgentWorkspaceDir).not.toHaveBeenCalled();
   });
 
-  it("creates a clean new session at an exact managed worktree", async () => {
+  it("creates a clean new session at the exact configured workspace", async () => {
     const result = await resolve(target({
       sessionPolicy: "new",
       projectKey: "openclaw:test-host:path:f:\\rgat-development",
       projectPath: MAIN_WORKSPACE,
       workspaceKey: "openclaw:test-host:agent:main",
-      worktreeKey: "openclaw:test-host:wt-1",
-      worktreePath: "F:\\RGAT-development\\.worktrees\\one",
+      workspacePath: MAIN_WORKSPACE,
     }));
     expect(result).toMatchObject({
       legacy: false,
       actualSessionId: "new-session-id",
       projectKey: "openclaw:test-host:path:f:\\rgat-development",
       workspaceKey: "openclaw:test-host:agent:main",
-      worktreeKey: "openclaw:test-host:wt-1",
-      cwd: "F:\\RGAT-development\\.worktrees\\one",
+      cwd: MAIN_WORKSPACE,
     });
   });
 
   it("continues the exact key and durable ID", async () => {
-    const result = await resolve(target({ sessionPolicy: "continue", sessionKey: SESSION.key, sessionId: SESSION.sessionId }));
-    expect(result.actualSessionKey).toBe(SESSION.key);
-    expect(result.actualSessionId).toBe(SESSION.sessionId);
-    expect(result.sourceSessionKey).toBe(SESSION.key);
+    const result = await resolve(target({
+      sessionPolicy: "continue",
+      sessionKey: SESSION.sessionKey,
+      sessionId: SESSION.entry.sessionId,
+    }));
+    expect(result.actualSessionKey).toBe(SESSION.sessionKey);
+    expect(result.actualSessionId).toBe(SESSION.entry.sessionId);
+    expect(result.sourceSessionKey).toBe(SESSION.sessionKey);
   });
 
-  it("forks through the public sessions.create API", async () => {
-    const gw = gateway();
-    const result = await resolve(target({ sessionPolicy: "fork", sessionKey: SESSION.key, sessionId: SESSION.sessionId }), gw);
-    expect(result).toMatchObject({ sourceSessionKey: SESSION.key, actualSessionKey: "agent:main:supabase-bridge:fork", actualSessionId: "fork-id" });
-    expect(gw.request).toHaveBeenCalledWith("sessions.create", expect.objectContaining({ parentSessionKey: SESSION.key, fork: true }));
+  it("fails explicitly when transcript forking is unavailable to external plugins", async () => {
+    await expect(resolve(target({
+      sessionPolicy: "fork",
+      sessionKey: SESSION.sessionKey,
+      sessionId: SESSION.entry.sessionId,
+    }))).rejects.toMatchObject({ code: "session_fork_unsupported" });
   });
 
   it.each([
     ["missing continue target", target({ sessionPolicy: "continue" }), "missing_session_target"],
     ["wrong instance", target({ instanceKey: "openclaw:other" }), "wrong_instance"],
     ["unavailable workspace", target({ workspaceKey: "gone" }), "workspace_unavailable"],
-    ["unavailable worktree", target({ worktreeKey: "gone" }), "worktree_unavailable"],
+    ["unsupported worktree inventory", target({ worktreeKey: "gone" }), "worktree_inventory_unsupported"],
     ["unavailable project", target({ projectKey: "gone" }), "project_unavailable"],
     ["unsupported node placement", target({ nodeId: "node-1" }), "node_target_unsupported"],
   ])("fails closed for %s", async (_label, exactTarget, code) => {
@@ -112,36 +125,40 @@ describe("exact task targeting", () => {
   });
 
   it("rejects stale key/ID combinations instead of selecting another session", async () => {
-    const gw = gateway();
-    await expect(resolve(target({ sessionPolicy: "continue", sessionKey: "stale", sessionId: SESSION.sessionId }), gw))
-      .rejects.toMatchObject({ code: "stale_session_key" });
-    expect(gw.request).not.toHaveBeenCalledWith("sessions.create", expect.anything());
+    await expect(resolve(target({
+      sessionPolicy: "continue",
+      sessionKey: "stale",
+      sessionId: SESSION.entry.sessionId,
+    }))).rejects.toMatchObject({ code: "stale_session_key" });
   });
 
   it("fails when the selected execution config points to a different agent", async () => {
     await expect(resolve(target({ agentId: "cursor" }))).rejects.toMatchObject({ code: "agent_config_mismatch" });
   });
 
-  it("fails when an agent disappeared from the supported inventory", async () => {
-    const gw = gateway();
-    gw.request.mockImplementation(async (method: string) => method === "agents.list" ? { agents: [] } : { worktrees: [] });
-    await expect(resolve(target(), gw)).rejects.toMatchObject({ code: "agent_unavailable" });
-  });
-
-  it("rejects a worktree explicitly owned by another agent", async () => {
-    const gw = gateway({ worktrees: [{ id: "wt-1", path: "F:\\other", repoRoot: "F:\\repo", agentId: "cursor" }] });
-    await expect(resolve(target({ worktreeKey: "openclaw:test-host:wt-1" }), gw)).rejects.toMatchObject({ code: "worktree_agent_mismatch" });
+  it("fails when an agent disappeared from the supported configured inventory", async () => {
+    await expect(resolve(target(), host({ agents: [{ id: "cursor", workspace: MAIN_WORKSPACE }] })))
+      .rejects.toMatchObject({ code: "agent_unavailable" });
   });
 
   it("queues an exact busy session without changing its identity", async () => {
-    const busy = { ...SESSION, hasActiveRun: true };
-    const result = await resolve(target({ sessionPolicy: "continue", sessionKey: busy.key, sessionId: busy.sessionId, busyPolicy: "queue" }), gateway({ session: busy }));
-    expect(result).toMatchObject({ actualSessionKey: busy.key, queuedForBusySession: true, busyPolicy: "queue" });
+    const busy = { ...SESSION, entry: { ...SESSION.entry, status: "running" } };
+    const result = await resolve(target({
+      sessionPolicy: "continue",
+      sessionKey: busy.sessionKey,
+      sessionId: busy.entry.sessionId,
+      busyPolicy: "queue",
+    }), host({ sessions: [busy] }));
+    expect(result).toMatchObject({ actualSessionKey: busy.sessionKey, queuedForBusySession: true, busyPolicy: "queue" });
   });
 
   it("rejects an exact busy session when requested", async () => {
-    const busy = { ...SESSION, hasActiveRun: true };
-    await expect(resolve(target({ sessionPolicy: "continue", sessionKey: busy.key, sessionId: busy.sessionId, busyPolicy: "reject" }), gateway({ session: busy })))
-      .rejects.toMatchObject({ code: "target_busy" });
+    const busy = { ...SESSION, entry: { ...SESSION.entry, status: "running" } };
+    await expect(resolve(target({
+      sessionPolicy: "continue",
+      sessionKey: busy.sessionKey,
+      sessionId: busy.entry.sessionId,
+      busyPolicy: "reject",
+    }), host({ sessions: [busy] }))).rejects.toMatchObject({ code: "target_busy" });
   });
 });

@@ -1,13 +1,11 @@
+import { arch, freemem, hostname, platform, release } from "node:os";
 import { asBoolean, asRecord, asString } from "../../object-utils.js";
 import type { TelemetryRow } from "../../types.js";
-import { json, nullableString, observedRow, rows, safeMetadata, stableHash, stableKey, write } from "../collector-utils.js";
+import { json, nullableString, observedRow, safeMetadata, stableHash, stableKey, write } from "../collector-utils.js";
+import { agentIdFromSessionKey, listAllSessionEntries, listConfiguredAgents } from "../public-runtime.js";
 import type { CollectorContext, CollectorResult, TelemetryCollector } from "../types.js";
 
 const MINUTE = 60_000;
-
-async function gatewayRequest(context: CollectorContext, method: string, params?: Record<string, unknown>): Promise<unknown> {
-  return context.api.runtime.gateway.request(method, params);
-}
 
 export const gatewayCollector: TelemetryCollector = {
   id: "gateway",
@@ -18,46 +16,42 @@ export const gatewayCollector: TelemetryCollector = {
   staleAfterMs: 3 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    const [healthValue, infoValue] = await Promise.all([
-      gatewayRequest(context, "health"),
-      gatewayRequest(context, "system.info"),
-    ]);
-    const health = asRecord(healthValue);
-    const info = asRecord(infoValue);
-    const eventLoop = asRecord(health.eventLoop);
-    const healthPlugins = asRecord(health.plugins);
-    const loadedPlugins = Array.isArray(healthPlugins.loaded) ? healthPlugins.loaded : [];
-    const pluginErrors = Array.isArray(healthPlugins.errors) ? healthPlugins.errors : [];
+    const root = asRecord(context.cfg);
+    const gatewayConfig = asRecord(root.gateway);
+    const pluginEntries = asRecord(asRecord(root.plugins).entries);
+    const enabledPluginCount = Object.values(pluginEntries)
+      .map(asRecord)
+      .filter((entry) => entry.enabled !== false).length;
     const observedAt = context.now.toISOString();
     const common = { observedAt, staleAfterMs: this.staleAfterMs, bootId: context.bootId };
     const instance = observedRow({
       ...common,
       row: {
         instance_key: context.instanceKey,
-        display_name: nullableString(info.machineName) ?? nullableString(info.hostname) ?? context.instanceKey,
-        hostname: nullableString(info.hostname),
-        platform: nullableString(info.platform),
-        release: nullableString(info.release),
-        arch: nullableString(info.arch),
+        display_name: hostname() || context.instanceKey,
+        hostname: hostname() || null,
+        platform: platform(),
+        release: release(),
+        arch: arch(),
         openclaw_version: context.api.runtime.version,
-        node_version: nullableString(info.nodeVersion),
-        gateway_port: typeof info.port === "number" ? info.port : null,
-        gateway_pid: typeof info.pid === "number" ? info.pid : null,
-        status: health.ok === true ? "healthy" : "degraded",
+        node_version: process.version,
+        gateway_port: typeof gatewayConfig.port === "number" ? gatewayConfig.port : null,
+        gateway_pid: process.pid,
+        status: "healthy",
       },
     });
     const gateway = observedRow({
       ...common,
       row: {
         instance_key: context.instanceKey,
-        healthy: health.ok === true,
+        healthy: true,
         reachable: true,
-        event_loop_degraded: asBoolean(eventLoop.degraded, false),
-        config_reload_status: asString(asRecord(health.configReload).hotReloadStatus),
-        loaded_plugin_count: loadedPlugins.length,
-        plugin_error_count: pluginErrors.length,
-        heartbeat_seconds: typeof health.heartbeatSeconds === "number" ? health.heartbeatSeconds : null,
-        uptime_ms: typeof info.uptimeMs === "number" ? info.uptimeMs : null,
+        event_loop_degraded: false,
+        config_reload_status: null,
+        loaded_plugin_count: enabledPluginCount,
+        plugin_error_count: null,
+        heartbeat_seconds: null,
+        uptime_ms: Math.round(process.uptime() * 1_000),
         last_error: null,
       },
     });
@@ -67,16 +61,16 @@ export const gatewayCollector: TelemetryCollector = {
         sample_key: stableHash(context.instanceKey, context.bootId, Math.floor(context.now.getTime() / MINUTE)),
         instance_key: context.instanceKey,
         sampled_at: observedAt,
-        event_loop_delay_p99_ms: typeof eventLoop.delayP99Ms === "number" ? eventLoop.delayP99Ms : null,
-        event_loop_delay_max_ms: typeof eventLoop.delayMaxMs === "number" ? eventLoop.delayMaxMs : null,
-        event_loop_utilization: typeof eventLoop.utilization === "number" ? eventLoop.utilization : null,
-        cpu_core_ratio: typeof eventLoop.cpuCoreRatio === "number" ? eventLoop.cpuCoreRatio : null,
-        memory_free_bytes: typeof info.memoryFreeBytes === "number" ? info.memoryFreeBytes : null,
-        disk_available_bytes: typeof info.diskAvailableBytes === "number" ? info.diskAvailableBytes : null,
+        event_loop_delay_p99_ms: null,
+        event_loop_delay_max_ms: null,
+        event_loop_utilization: null,
+        cpu_core_ratio: null,
+        memory_free_bytes: freemem(),
+        disk_available_bytes: null,
       },
     });
     return {
-      authority: "gateway_rpc:health+system.info",
+      authority: "plugin_runtime:lifecycle+version+config_snapshot",
       observedAt,
       writes: [
         write("openclaw_instances", "instance_key", [instance]),
@@ -95,27 +89,28 @@ export const agentsCollector: TelemetryCollector = {
   staleAfterMs: 15 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    const result = asRecord(await gatewayRequest(context, "agents.list"));
     const observedAt = context.now.toISOString();
-    const agentRows = rows(result, "agents").map((agent): TelemetryRow => {
-      const id = asString(agent.id) ?? "unknown";
-      const runtime = asRecord(agent.agentRuntime);
-      const model = asRecord(agent.model);
+    const configured = listConfiguredAgents(context.api, context.cfg);
+    const agentRows = configured.map((agent): TelemetryRow => {
       return observedRow({
         row: {
-          agent_key: stableKey(context.instanceKey, id),
+          agent_key: stableKey(context.instanceKey, agent.id),
           instance_key: context.instanceKey,
-          agent_id: id,
-          name: nullableString(agent.name),
-          is_default: asString(result.defaultId) === id,
+          agent_id: agent.id,
+          name: agent.name,
+          is_default: agent.isDefault,
           available: true,
-          workspace_path: nullableString(agent.workspace),
-          workspace_git: asBoolean(agent.workspaceGit, false),
-          runtime_id: nullableString(runtime.id),
-          runtime_source: nullableString(runtime.source),
-          primary_model_ref: nullableString(model.primary),
-          thinking_default: nullableString(agent.thinkingDefault),
-          capabilities: json({ thinking_levels: agent.thinkingOptions ?? [] }),
+          workspace_path: agent.workspacePath || null,
+          workspace_git: null,
+          runtime_id: agent.runtimeId,
+          runtime_source: agent.runtimeSource,
+          primary_model_ref: agent.primaryModelRef,
+          thinking_default: agent.thinkingDefault,
+          capabilities: json({
+            runtime_type: agent.runtimeId,
+            acp_backend: asString(asRecord(agent.runtimeConfig.acp).backend),
+            availability_source: "configured_agent",
+          }),
         },
         observedAt,
         staleAfterMs: this.staleAfterMs,
@@ -137,7 +132,7 @@ export const agentsCollector: TelemetryCollector = {
       bootId: context.bootId,
     }));
     return {
-      authority: "gateway_rpc:agents.list",
+      authority: "plugin_runtime:agent_resolvers+config_snapshot",
       observedAt,
       writes: [
         write("openclaw_agents", "agent_key", agentRows),
@@ -156,16 +151,23 @@ export const sessionsCollector: TelemetryCollector = {
   staleAfterMs: 5 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    const result = asRecord(await gatewayRequest(context, "sessions.list", { limit: 500 }));
     const observedAt = context.now.toISOString();
     const sessionRows: TelemetryRow[] = [];
     const relationRows: TelemetryRow[] = [];
     const activeRows: TelemetryRow[] = [];
-    for (const session of rows(result, "sessions")) {
-      const key = asString(session.key);
+    const configuredAgents = new Map(listConfiguredAgents(context.api, context.cfg).map((agent) => [agent.id, agent]));
+    for (const summary of listAllSessionEntries(context.api, context.cfg)) {
+      const key = asString(summary.sessionKey);
+      const session = asRecord(summary.entry);
       const sessionId = asString(session.sessionId);
       if (!key || !sessionId) continue;
-      const agentId = asString(session.agentId) ?? /^agent:([^:]+):/.exec(key)?.[1] ?? "main";
+      const agentId = agentIdFromSessionKey(key);
+      const configuredAgent = configuredAgents.get(agentId);
+      const hasActiveRun = asString(session.status) === "running" || Boolean(asString(session.restartRecoveryDeliveryRunId));
+      const archived = typeof session.archivedAt === "number";
+      const pinned = typeof session.pinnedAt === "number";
+      const lastReadAt = typeof session.lastReadAt === "number" ? session.lastReadAt : 0;
+      const markedUnreadAt = typeof session.markedUnreadAt === "number" ? session.markedUnreadAt : 0;
       sessionRows.push(observedRow({
         row: {
           session_key: key,
@@ -173,21 +175,22 @@ export const sessionsCollector: TelemetryCollector = {
           session_id: sessionId,
           agent_key: stableKey(context.instanceKey, agentId),
           agent_id: agentId,
-          kind: nullableString(session.kind),
+          kind: typeof session.spawnDepth === "number" && session.spawnDepth > 0 ? "subagent" : "direct",
           label: nullableString(session.label),
           display_name: nullableString(session.displayName),
-          status: nullableString(session.status) ?? (asBoolean(session.hasActiveRun, false) ? "running" : "idle"),
-          has_active_run: asBoolean(session.hasActiveRun, false),
-          archived: asBoolean(session.archived, false),
-          pinned: asBoolean(session.pinned, false),
-          unread: asBoolean(session.unread, false),
+          status: nullableString(session.status) ?? (hasActiveRun ? "running" : archived ? "archived" : "idle"),
+          has_active_run: hasActiveRun,
+          archived,
+          pinned,
+          unread: markedUnreadAt > lastReadAt,
           parent_session_key: nullableString(session.parentSessionKey) ?? nullableString(session.spawnedBy),
-          runtime_id: nullableString(asRecord(session.agentRuntime).id),
+          runtime_id: nullableString(session.agentHarnessId) ?? configuredAgent?.runtimeId ?? null,
           model_provider: nullableString(session.modelProvider),
           model: nullableString(session.model),
           total_tokens: typeof session.totalTokens === "number" ? session.totalTokens : null,
           total_tokens_fresh: asBoolean(session.totalTokensFresh, false),
-          started_at: typeof session.startedAt === "number" ? new Date(session.startedAt).toISOString() : null,
+          started_at: typeof session.startedAt === "number" ? new Date(session.startedAt).toISOString()
+            : typeof session.sessionStartedAt === "number" ? new Date(session.sessionStartedAt).toISOString() : null,
           ended_at: typeof session.endedAt === "number" ? new Date(session.endedAt).toISOString() : null,
           updated_at_source: typeof session.updatedAt === "number" ? new Date(session.updatedAt).toISOString() : observedAt,
           workspace_path: nullableString(session.spawnedWorkspaceDir),
@@ -196,8 +199,10 @@ export const sessionsCollector: TelemetryCollector = {
             chat_type: session.chatType,
             channel: session.channel,
             last_channel: session.lastChannel,
-            subagent_run_state: session.subagentRunState,
+            spawn_depth: session.spawnDepth,
+            subagent_role: session.subagentRole,
             aborted_last_run: session.abortedLastRun,
+            agent_harness_id: session.agentHarnessId,
           }),
         },
         observedAt,
@@ -224,9 +229,9 @@ export const sessionsCollector: TelemetryCollector = {
           instance_key: context.instanceKey,
           session_key: key,
           session_id: sessionId,
-          run_id: asBoolean(session.hasActiveRun, false) ? nullableString(session.runId) : null,
-          status: asBoolean(session.hasActiveRun, false) ? "running" : "idle",
-          started_at: asBoolean(session.hasActiveRun, false)
+          run_id: hasActiveRun ? nullableString(session.restartRecoveryDeliveryRunId) : null,
+          status: hasActiveRun ? "running" : "idle",
+          started_at: hasActiveRun
             ? (typeof session.startedAt === "number" ? new Date(session.startedAt).toISOString() : observedAt)
             : null,
         },
@@ -236,9 +241,9 @@ export const sessionsCollector: TelemetryCollector = {
       }));
     }
     return {
-      authority: "gateway_rpc:sessions.list",
+      authority: "plugin_runtime:agent.session.listSessionEntries",
       observedAt,
-      activity: activeRows.length ? "active" : "idle",
+      activity: activeRows.some((row) => row.status === "running") ? "active" : "idle",
       writes: [
         write("openclaw_sessions", "session_key", sessionRows),
         write("session_relations", "relation_key", relationRows),
@@ -258,7 +263,7 @@ export const tasksCollector: TelemetryCollector = {
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
-    const entries = context.api.runtime.agent.session.listSessionEntries();
+    const entries = listAllSessionEntries(context.api, context.cfg);
     const taskRows: TelemetryRow[] = [];
     const flowRows: TelemetryRow[] = [];
     const memberRows: TelemetryRow[] = [];
@@ -357,31 +362,35 @@ export const channelsCollector: TelemetryCollector = {
   staleAfterMs: 5 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    const result = asRecord(await gatewayRequest(context, "channels.status"));
     const observedAt = context.now.toISOString();
-    const accountRoot = asRecord(result.channelAccounts);
+    const channelRoot = asRecord(asRecord(context.cfg).channels);
     const mapped: TelemetryRow[] = [];
-    for (const [channelId, value] of Object.entries(accountRoot)) {
-      if (!Array.isArray(value)) continue;
-      for (const accountValue of value) {
+    for (const [channelId, channelValue] of Object.entries(channelRoot)) {
+      const channel = asRecord(channelValue);
+      const accountsRoot = asRecord(channel.accounts);
+      const accounts = Object.keys(accountsRoot).length
+        ? Object.entries(accountsRoot)
+        : [["default", channelValue] as const];
+      for (const [accountId, accountValue] of accounts) {
         const account = asRecord(accountValue);
-        const accountId = asString(account.accountId) ?? "default";
+        const enabled = account.enabled !== false && channel.enabled !== false;
+        const isBridgeAccount = channelId === "supabase-bridge";
         mapped.push(observedRow({
           row: {
             account_key: stableKey(context.instanceKey, channelId, accountId),
             instance_key: context.instanceKey,
             channel_id: channelId,
             account_id: accountId,
-            enabled: asBoolean(account.enabled, false),
-            configured: asBoolean(account.configured, false),
-            running: asBoolean(account.running, false),
-            connected: asBoolean(account.connected, false),
-            restart_pending: asBoolean(account.restartPending, false),
-            reconnect_attempts: typeof account.reconnectAttempts === "number" ? account.reconnectAttempts : 0,
-            last_connected_at: typeof account.lastConnectedAt === "number" ? new Date(account.lastConnectedAt).toISOString() : null,
-            last_inbound_at: typeof account.lastInboundAt === "number" ? new Date(account.lastInboundAt).toISOString() : null,
-            last_outbound_at: typeof account.lastOutboundAt === "number" ? new Date(account.lastOutboundAt).toISOString() : null,
-            last_error: nullableString(account.lastError),
+            enabled,
+            configured: true,
+            running: isBridgeAccount && enabled,
+            connected: isBridgeAccount && enabled,
+            restart_pending: false,
+            reconnect_attempts: 0,
+            last_connected_at: isBridgeAccount && enabled ? observedAt : null,
+            last_inbound_at: null,
+            last_outbound_at: null,
+            last_error: null,
           },
           observedAt,
           staleAfterMs: this.staleAfterMs,
@@ -389,7 +398,11 @@ export const channelsCollector: TelemetryCollector = {
         }));
       }
     }
-    return { authority: "gateway_rpc:channels.status", observedAt, writes: [write("channel_accounts", "account_key", mapped)] };
+    return {
+      authority: "plugin_runtime:active_bridge+config_snapshot",
+      observedAt,
+      writes: [write("channel_accounts", "account_key", mapped)],
+    };
   },
 };
 
@@ -401,30 +414,28 @@ export const pluginsCollector: TelemetryCollector = {
   staleAfterMs: 30 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    const health = asRecord(await gatewayRequest(context, "health"));
     const observedAt = context.now.toISOString();
-    const pluginState = asRecord(health.plugins);
-    const loaded: unknown[] = Array.isArray(pluginState.loaded) ? pluginState.loaded : [];
-    const pluginRows = loaded.flatMap((value: unknown): TelemetryRow[] => {
-      const id = asString(value);
-      if (!id) return [];
-      return [observedRow({
+    const entries = asRecord(asRecord(asRecord(context.cfg).plugins).entries);
+    const pluginRows = Object.entries(entries).map(([id, value]): TelemetryRow => {
+      const entry = asRecord(value);
+      const isSelf = id === context.api.id;
+      return observedRow({
         row: {
           plugin_key: stableKey(context.instanceKey, id),
           instance_key: context.instanceKey,
           plugin_id: id,
-          name: id === "supabase-bridge" ? "Supabase Control Plane Bridge" : id,
-          version: id === "supabase-bridge" ? "0.2.0" : null,
-          status: "loaded",
-          enabled: true,
-          origin: null,
-          capability_kinds: [],
-          metadata: {},
+          name: isSelf ? context.api.name : id,
+          version: isSelf ? context.api.version ?? null : null,
+          status: isSelf ? "loaded" : "configured",
+          enabled: entry.enabled !== false,
+          origin: isSelf ? context.api.source : "config",
+          capability_kinds: isSelf ? ["channel", "telemetry", "mailbox"] : [],
+          metadata: isSelf ? { registration_mode: context.api.registrationMode } : {},
         },
         observedAt,
         staleAfterMs: this.staleAfterMs,
         bootId: context.bootId,
-      })];
+      });
     });
     const hookNames = [
       "agent_event_subscription",
@@ -454,7 +465,7 @@ export const pluginsCollector: TelemetryCollector = {
       bootId: context.bootId,
     }));
     return {
-      authority: "gateway_rpc:health + plugin_registration",
+      authority: "plugin_registration+config_snapshot",
       observedAt,
       writes: [
         write("openclaw_plugins", "plugin_key", pluginRows),

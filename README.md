@@ -11,7 +11,7 @@ OpenClaw remains authoritative and remains the orchestrator. Supabase is a time-
 
 ## Database objects
 
-For a new deployment apply both migrations in order. Existing v0.1.x installations must leave `202608220001_supabase_bridge.sql` unchanged and apply only [`migrations/202608220002_openclaw_control_plane_uplink.sql`](migrations/202608220002_openclaw_control_plane_uplink.sql) before installing v0.2.0.
+For a new deployment apply both migrations in order. Existing v0.1.x installations must leave `202608220001_supabase_bridge.sql` unchanged and apply only [`migrations/202608220002_openclaw_control_plane_uplink.sql`](migrations/202608220002_openclaw_control_plane_uplink.sql) before installing v0.2.x.
 
 The first migration creates:
 
@@ -62,7 +62,7 @@ Do not place secrets in `prompt`, `metadata`, or any other task field.
 
 If a legacy task has no `task_targets` row, the old fallback behavior is unchanged: a missing, unknown, or unavailable `requested_config` falls back to the available default and records the reason. An explicitly targeted task never silently changes agent, session, instance, workspace, worktree, or requested configuration.
 
-For targeted work, use the atomic `submit_bridge_task_v2` RPC so Realtime cannot observe the task before its target exists. `session_policy` supports `new`, `continue`, and `fork`; `busy_policy` supports `queue` and `reject`. Exact examples are in [task targeting](docs/task-targeting.md).
+For targeted work, use the atomic `submit_bridge_task_v2` RPC so Realtime cannot observe the task before its target exists. On external-plugin installs of OpenClaw 2026.7.1-2, `new` and `continue` are supported; `fork` is accepted by the schema but fails explicitly as `session_fork_unsupported` because transcript forking has no public external-plugin API. `busy_policy` supports `queue` and `reject`. Exact examples are in [task targeting](docs/task-targeting.md).
 
 ## Provider/config discovery
 
@@ -79,7 +79,7 @@ The plugin does not hard-code the machine’s provider inventory.
 
 ## Execution and reports
 
-The channel uses OpenClaw’s public `runEmbeddedAgent` runtime helper. Native choices route to the selected provider/model/effort and ACP choices route to the configured ACP agent. Legacy and `new` tasks get a clean bridge-owned session. `continue` uses the exact key and durable ID after revalidation. `fork` uses the public `sessions.create` RPC with `parentSessionKey` and `fork: true`; private transcript files are never copied.
+The channel uses OpenClaw’s public `runEmbeddedAgent` runtime helper. Native choices route to the selected provider/model/effort and ACP choices route to the configured ACP agent. Legacy and `new` tasks get a clean bridge-owned session. `continue` uses the exact key and durable ID after revalidation through `runtime.agent.session.listSessionEntries`. OpenClaw 2026.7.1-2 restricts `sessions.create` and transcript forking to trusted Gateway clients, so an external bridge fails `fork` explicitly rather than bypassing trust or copying transcript files.
 
 The final visible assistant response becomes `reports.report_text`. Structured metadata includes status, selected config, duration, usage, fallback attempts, and accepted child sessions when OpenClaw exposes them. Reports do not contain the full transcript.
 
@@ -93,7 +93,7 @@ Set `eventLoggingEnabled` to `false` to retain only task/run/report state.
 
 ## Control-plane telemetry
 
-The v0.2 lifecycle manager owns independent collectors for Gateway, agents, sessions, OpenClaw tasks/flows, channels, plugins/hooks, models/auth/ACP, tools, skills, execution policy/MCP metadata, cron, workspaces/worktrees, nodes/devices, approvals/audit, memory health, and policy-document metadata. Public hooks trigger reconciliation; unchanged idle state backs off; active state uses faster intervals; failures use bounded exponential backoff; unsupported domains stop pointless polling.
+The v0.2 lifecycle manager owns independent collectors for Gateway, agents, sessions, OpenClaw tasks/flows, channels, plugins/hooks, models/auth/ACP, tools, skills, execution policy/MCP metadata, cron, projects/workspaces, nodes/devices, approvals/audit, memory health, and policy-document metadata. External plugins use only supported in-process runtime/config/event surfaces. OpenClaw 2026.7.1-2 does not expose global tool/skill/cron/approval/audit/memory-policy snapshots, managed-worktree inventory, or device-pairing inventory to external plugins; those limitations are written as explicit `unsupported` state documents and never retried through forbidden Gateway RPCs.
 
 Every current-state row carries source/ingestion/success/change timestamps, a stale deadline, freshness, and a boot identifier where transient state is involved. Views recompute effective staleness at query time. General prompts, replies, transcripts, memory content, cron payloads, approval commands, browser history, IP addresses, cookies, tokens, environment values, and private key material are excluded.
 
@@ -165,13 +165,13 @@ Build and package from the stable user-owned source directory:
 npm install
 npm run validate
 npm pack
-openclaw plugins install npm-pack:.\local-openclaw-supabase-bridge-0.2.0.tgz
+openclaw plugins install npm-pack:.\local-openclaw-supabase-bridge-0.2.1.tgz
 openclaw plugins enable supabase-bridge
 ```
 
 `npm-pack:` installs runtime dependencies into OpenClaw’s managed per-plugin project and records upgrade-safe provenance. Editable source remains outside OpenClaw core.
 
-Do not install v0.2.0 before the additive migration is applied. After applying it and configuring the SecretRef, upgrade, restart, and verify:
+Do not install v0.2.x before the additive migration is applied. After applying it and configuring the SecretRef, upgrade, restart, and verify:
 
 ```powershell
 openclaw gateway restart
@@ -203,7 +203,7 @@ npm run build
 npm run validate
 ```
 
-Tests cover the v0.1 behavior plus exact new/continue/fork targeting, stale/mismatched targets, busy policies, placement validation, historical run truth, safe session/task mirrors, freshness, adaptive collection, self-health, per-run usage authority, migration/view shape, and duplicate controller ownership.
+Tests cover the v0.1 behavior plus exact new/continue targeting, explicit unsupported fork/worktree behavior, stale/mismatched targets, busy policies, placement validation, historical run truth, safe session/task mirrors, freshness, adaptive collection, self-health, per-run usage authority, migration/view shape, and duplicate controller ownership.
 
 ## Troubleshooting
 

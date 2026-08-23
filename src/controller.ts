@@ -53,6 +53,7 @@ interface ActiveRun {
   bridgeRunId: string;
   sessionKey: string;
   sourceRunId: string | null;
+  abortController: AbortController;
 }
 
 interface TaskPayload {
@@ -280,17 +281,7 @@ export class BridgeController {
   async requestCancellation(taskId: string): Promise<void> {
     const active = this.#activeRuns.get(taskId);
     if (!active) return;
-    try {
-      await this.#api.runtime.gateway.request("chat.abort", {
-        sessionKey: active.sessionKey,
-        ...(active.sourceRunId ? { runId: active.sourceRunId } : {}),
-      });
-    } catch (error) {
-      this.#logger.warn("Supabase Bridge cancellation request could not abort active OpenClaw run", {
-        taskId,
-        error: errorMessage(error),
-      });
-    }
+    active.abortController.abort(new Error(`Supabase task ${taskId} was cancelled`));
   }
 
   async recordOutbound(target: string, text: string): Promise<string> {
@@ -462,7 +453,8 @@ export class BridgeController {
       const resolved = resolveTargetedExecutionConfig(claimed.requestedConfig, target?.agentId, this.#inventory!.configs);
       const defaultWorkspace = this.#api.runtime.agent.resolveAgentWorkspaceDir(this.#cfg, resolved.config.agent);
       const executionTarget = await resolveExecutionTarget({
-        gateway: this.#api.runtime.gateway,
+        api: this.#api,
+        cfg: this.#cfg,
         target,
         taskId: claimed.id,
         instanceKey: this.#config.instanceKey,
@@ -517,7 +509,14 @@ export class BridgeController {
     const run = await this.#database.startRun(startInput);
     this.#logger.info("Supabase Bridge run started", { taskId: task.id, runId, usedConfig: selected.configKey });
     this.#correlator.registerParent({ taskId: task.id, bridgeRunId: runId, sessionKey, sessionId });
-    const active: ActiveRun = { taskId: task.id, bridgeRunId: runId, sessionKey, sourceRunId: null };
+    const abortController = new AbortController();
+    const active: ActiveRun = {
+      taskId: task.id,
+      bridgeRunId: runId,
+      sessionKey,
+      sourceRunId: null,
+      abortController,
+    };
     this.#activeRuns.set(task.id, active);
     this.#eventBuffer.append(manualEvent({
       taskId: task.id,
@@ -571,6 +570,7 @@ export class BridgeController {
         allowGatewaySubagentBinding: true,
         config: this.#cfg,
         timeoutMs: this.#api.runtime.agent.resolveAgentTimeoutMs({ cfg: this.#cfg }),
+        abortSignal: abortController.signal,
       };
       if (selected.runtime === "native") {
         params.provider = selected.providerKey;

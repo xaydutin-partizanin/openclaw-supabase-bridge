@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { asBoolean, asRecord, asString } from "./object-utils.js";
+import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+import { asRecord, asString } from "./object-utils.js";
+import { listAllSessionEntries, listConfiguredAgents } from "./telemetry/public-runtime.js";
 import type { AgentConfigRecord, ExecutionTargetPlan, TaskTargetRecord } from "./types.js";
 
 export class ExactTargetError extends Error {
@@ -11,10 +13,6 @@ export class ExactTargetError extends Error {
     this.name = "ExactTargetError";
     this.code = code;
   }
-}
-
-export interface TargetingGateway {
-  request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
 }
 
 interface SessionCandidate {
@@ -52,32 +50,29 @@ function sessionAgentId(key: string, explicit?: unknown): string {
   return match?.[1] ?? "main";
 }
 
-function sessionCandidate(value: unknown): SessionCandidate | null {
-  const row = asRecord(value);
-  const key = asString(row.key) ?? asString(row.sessionKey);
-  const sessionId = asString(row.sessionId);
+function sessionCandidate(summary: unknown): SessionCandidate | null {
+  const row = asRecord(summary);
+  const entry = asRecord(row.entry);
+  const key = asString(row.sessionKey);
+  const sessionId = asString(entry.sessionId);
   if (!key || !sessionId) return null;
   return {
     key,
     sessionId,
-    agentId: sessionAgentId(key, row.agentId),
-    hasActiveRun: asBoolean(row.hasActiveRun, false),
+    agentId: sessionAgentId(key),
+    hasActiveRun: asString(entry.status) === "running" || Boolean(asString(entry.restartRecoveryDeliveryRunId)),
   };
 }
 
-async function resolveExactSession(gateway: TargetingGateway, target: TaskTargetRecord): Promise<SessionCandidate> {
+function resolveExactSession(api: OpenClawPluginApi, cfg: OpenClawConfig, target: TaskTargetRecord): SessionCandidate {
   if (!target.sessionKey && !target.sessionId) {
     throw new ExactTargetError("missing_session_target", `${target.sessionPolicy} requires session_key or session_id`);
   }
-
-  const resolve = async (params: Record<string, unknown>): Promise<SessionCandidate | null> => {
-    const result = asRecord(await gateway.request("sessions.resolve", { ...params, allowMissing: true }));
-    if (result.ok === false) return null;
-    return sessionCandidate(result.session ?? result);
-  };
-
-  const byKey = target.sessionKey ? await resolve({ key: target.sessionKey }) : null;
-  const byId = target.sessionId ? await resolve({ sessionId: target.sessionId }) : null;
+  const sessions = listAllSessionEntries(api, cfg)
+    .map(sessionCandidate)
+    .filter((candidate): candidate is SessionCandidate => candidate !== null);
+  const byKey = target.sessionKey ? sessions.find((candidate) => candidate.key === target.sessionKey) ?? null : null;
+  const byId = target.sessionId ? sessions.find((candidate) => candidate.sessionId === target.sessionId) ?? null : null;
   const selected = byKey ?? byId;
   if (!selected) throw new ExactTargetError("session_not_found", "The requested OpenClaw session does not exist");
   if (byKey && byId && (byKey.key !== byId.key || byKey.sessionId !== byId.sessionId)) {
@@ -89,32 +84,12 @@ async function resolveExactSession(gateway: TargetingGateway, target: TaskTarget
   if (target.sessionId && selected.sessionId !== target.sessionId) {
     throw new ExactTargetError("stale_session_id", "The requested session ID no longer identifies the expected session");
   }
-  try {
-    const listed = asRecord(await gateway.request("sessions.list", {
-      includeGlobal: true,
-      includeUnknown: true,
-      limit: 1_000,
-    }));
-    const sessions = Array.isArray(listed.sessions) ? listed.sessions.map(sessionCandidate).filter((row): row is SessionCandidate => row !== null) : [];
-    const exact = sessions.find((candidate) => candidate.key === selected.key && candidate.sessionId === selected.sessionId);
-    if (!exact) {
-      throw new ExactTargetError(
-        "session_activity_unavailable",
-        "The requested session resolved, but its current activity state could not be verified",
-      );
-    }
-    return exact;
-  } catch (error) {
-    if (error instanceof ExactTargetError) throw error;
-    throw new ExactTargetError(
-      "session_activity_unavailable",
-      "The requested session resolved, but OpenClaw did not provide its current activity state",
-    );
-  }
+  return selected;
 }
 
 async function resolvePlacement(
-  gateway: TargetingGateway,
+  api: OpenClawPluginApi,
+  cfg: OpenClawConfig,
   target: TaskTargetRecord,
   selected: AgentConfigRecord,
   defaultWorkspace: string,
@@ -128,14 +103,10 @@ async function resolvePlacement(
   worktreePath: string | null;
   cwd: string;
 }> {
-  const agentsResult = asRecord(await gateway.request("agents.list"));
-  const agents = Array.isArray(agentsResult.agents) ? agentsResult.agents.map(asRecord) : [];
-  const agent = agents.find((row) => asString(row.id) === selected.agent);
+  const agents = listConfiguredAgents(api, cfg);
+  const agent = agents.find((row) => row.id === selected.agent);
   if (!agent) throw new ExactTargetError("agent_unavailable", `Agent ${selected.agent} is unavailable`);
-  const agentWorkspace = asString(agent.workspace) ?? defaultWorkspace;
-
-  const worktreesResult = asRecord(await gateway.request("worktrees.list"));
-  const worktrees = Array.isArray(worktreesResult.worktrees) ? worktreesResult.worktrees.map(asRecord) : [];
+  const agentWorkspace = agent.workspacePath || defaultWorkspace;
   const candidates: WorkspaceCandidate[] = [
     {
       key: stableTargetKey(instanceKey, "agent", selected.agent),
@@ -143,24 +114,9 @@ async function resolvePlacement(
       path: agentWorkspace,
       agentId: selected.agent,
     },
-    ...worktrees.flatMap((row): WorkspaceCandidate[] => {
-      const worktreePath = asString(row.path);
-      if (!worktreePath) return [];
-      const id = asString(row.id);
-      return [{
-        key: id ? stableTargetKey(instanceKey, id) : stableTargetKey(instanceKey, "path", worktreePath),
-        upstreamId: id,
-        path: worktreePath,
-        agentId: asString(row.agentId),
-      }];
-    }),
   ];
   const projects: ProjectCandidate[] = [
     { key: stableTargetKey(instanceKey, "path", agentWorkspace), path: agentWorkspace },
-    ...worktrees.flatMap((row): ProjectCandidate[] => {
-      const repoRoot = asString(row.repoRoot);
-      return repoRoot ? [{ key: stableTargetKey(instanceKey, "path", repoRoot), path: repoRoot }] : [];
-    }),
   ];
 
   const findCandidate = (key: string | null, requestedPath: string | null): WorkspaceCandidate | null => {
@@ -174,14 +130,11 @@ async function resolvePlacement(
     return candidates.find((candidate) => normalizedPath(candidate.path) === normalizedPath(requestedPath)) ?? null;
   };
 
-  const worktree = target.worktreeKey || target.worktreePath
-    ? findCandidate(target.worktreeKey, target.worktreePath)
-    : null;
-  if ((target.worktreeKey || target.worktreePath) && !worktree) {
-    throw new ExactTargetError("worktree_unavailable", "The requested managed worktree is unavailable or its ID/path changed");
-  }
-  if (worktree?.agentId && worktree.agentId !== selected.agent) {
-    throw new ExactTargetError("worktree_agent_mismatch", "The requested worktree belongs to a different agent");
+  if (target.worktreeKey || target.worktreePath) {
+    throw new ExactTargetError(
+      "worktree_inventory_unsupported",
+      "OpenClaw 2026.7.1-2 does not expose managed worktree inventory to external plugins; target a configured workspace instead",
+    );
   }
 
   const workspace = target.workspaceKey || target.workspacePath
@@ -207,14 +160,14 @@ async function resolvePlacement(
     }
   }
 
-  const cwd = worktree?.path ?? workspace.path;
+  const cwd = workspace.path;
   return {
     projectKey: target.projectKey ?? project?.key ?? null,
     projectPath: requestedProjectPath ?? project?.path ?? null,
     workspaceKey: target.workspaceKey ?? workspace.key,
     workspacePath: workspace.path,
-    worktreeKey: worktree?.key ?? null,
-    worktreePath: worktree?.path ?? null,
+    worktreeKey: null,
+    worktreePath: null,
     cwd,
   };
 }
@@ -241,7 +194,8 @@ export function legacyTaskTarget(taskId: string): TaskTargetRecord {
 }
 
 export async function resolveExecutionTarget(input: {
-  gateway: TargetingGateway;
+  api: OpenClawPluginApi;
+  cfg: OpenClawConfig;
   target: TaskTargetRecord | null;
   taskId: string;
   instanceKey: string;
@@ -294,14 +248,14 @@ export async function resolveExecutionTarget(input: {
     };
   }
 
-  const placement = await resolvePlacement(input.gateway, target, input.selected, input.defaultWorkspace, input.instanceKey);
+  const placement = await resolvePlacement(input.api, input.cfg, target, input.selected, input.defaultWorkspace, input.instanceKey);
   let source: SessionCandidate | null = null;
   let actualSessionKey = `agent:${input.selected.agent}:supabase-bridge:${input.taskId}`;
   let actualSessionId = sessionIdFactory();
   let queuedForBusySession = false;
 
   if (target.sessionPolicy === "continue" || target.sessionPolicy === "fork") {
-    source = await resolveExactSession(input.gateway, target);
+    source = resolveExactSession(input.api, input.cfg, target);
     if (source.agentId !== input.selected.agent) {
       throw new ExactTargetError("session_agent_mismatch", "The requested session belongs to a different agent");
     }
@@ -313,20 +267,10 @@ export async function resolveExecutionTarget(input: {
       actualSessionKey = source.key;
       actualSessionId = source.sessionId;
     } else {
-      const created = asRecord(await input.gateway.request("sessions.create", {
-        key: actualSessionKey,
-        agentId: input.selected.agent,
-        parentSessionKey: source.key,
-        fork: true,
-        emitCommandHooks: true,
-      }));
-      const createdKey = asString(created.key);
-      const createdSessionId = asString(created.sessionId);
-      if (!createdKey || !createdSessionId) {
-        throw new ExactTargetError("fork_failed", "OpenClaw did not return an exact key and ID for the forked session");
-      }
-      actualSessionKey = createdKey;
-      actualSessionId = createdSessionId;
+      throw new ExactTargetError(
+        "session_fork_unsupported",
+        "OpenClaw 2026.7.1-2 has no supported external-plugin API for atomically forking a session transcript",
+      );
     }
   }
 
