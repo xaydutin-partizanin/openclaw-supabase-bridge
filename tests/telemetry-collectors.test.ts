@@ -51,6 +51,9 @@ describe("safe session and task mirrors", () => {
     expect(serialized).not.toContain("UNRELATED SECRET");
     expect(result.activity).toBe("active");
     expect(result.writes.find((item) => item.table === "session_active_runs")?.rows).toHaveLength(1);
+    expect(sessionsCollector.staleAfterMs).toBeGreaterThan(sessionsCollector.maxIntervalMs ?? 0);
+    expect(result.writes.find((item) => item.table === "openclaw_sessions")?.rows[0]?.stale_after)
+      .toBe("2026-08-22T12:20:00.000Z");
     expect(api.runtime.gateway.request).not.toHaveBeenCalled();
   });
 

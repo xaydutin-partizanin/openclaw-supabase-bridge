@@ -148,7 +148,9 @@ export const sessionsCollector: TelemetryCollector = {
   intervalMs: 2 * MINUTE,
   activeIntervalMs: 15_000,
   maxIntervalMs: 15 * MINUTE,
-  staleAfterMs: 5 * MINUTE,
+  // Keep idle session rows fresh through the longest adaptive polling interval,
+  // with one base interval of tolerance for scheduler/network jitter.
+  staleAfterMs: 20 * MINUTE,
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();

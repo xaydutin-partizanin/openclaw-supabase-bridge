@@ -486,7 +486,7 @@ export class TelemetryManager {
       instance_key: this.#instanceKey,
       worker_id: this.#workerId,
       boot_id: this.#bootId,
-      plugin_version: this.#api.version ?? "0.2.1",
+      plugin_version: this.#api.version ?? "0.2.2",
       status: this.#stopped ? "stopped" : "running",
       heartbeat_at: observedAt,
       supabase_state: this.#realtimeState === "connected" ? "connected" : "degraded",

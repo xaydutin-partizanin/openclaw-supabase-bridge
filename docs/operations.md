@@ -18,8 +18,8 @@ Freshness is not a cached green badge. Collectors write `source_observed_at`, `i
 1. Keep the live v0.1.2 package running.
 2. Apply `migrations/202608220002_openclaw_control_plane_uplink.sql` to the intended Supabase project.
 3. Run `docs/security-advisor-checklist.md`.
-4. Build/package v0.2.1 with `npm install`, `npm run validate`, and `npm pack`.
-5. Install `npm-pack:.\local-openclaw-supabase-bridge-0.2.1.tgz`, enable the plugin, and restart the Gateway.
+4. Build/package v0.2.2 with `npm install`, `npm run validate`, and `npm pack`.
+5. Install `npm-pack:.\local-openclaw-supabase-bridge-0.2.2.tgz`, enable the plugin, and restart the Gateway.
 6. Verify `openclaw plugins inspect supabase-bridge --runtime --json` and `openclaw channels status --deep`.
 7. Query `v_bridge_health`, `v_system_overview`, and `v_execution_targets`; confirm one worker/account.
 8. Submit harmless legacy, new, and continue tasks using `docs/task-targeting.md`; confirm fork/worktree targets fail with their documented unsupported codes.

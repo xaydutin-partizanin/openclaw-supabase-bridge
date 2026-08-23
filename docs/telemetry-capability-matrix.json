@@ -126,7 +126,7 @@
     "tables": ["openclaw_sessions", "session_active_runs", "session_relations"],
     "sensitiveExcluded": ["transcripts", "messages", "prompts", "reply bodies"],
     "writeCapability": "new/continue through task targeting",
-    "freshnessTarget": "5m",
+    "freshnessTarget": "20m max-idle freshness; event-driven refresh while active",
     "limitation": "Transcript forking is unavailable to external plugins; safe labels/titles may still be operator-authored metadata"
   },
   {

@@ -165,7 +165,7 @@ Build and package from the stable user-owned source directory:
 npm install
 npm run validate
 npm pack
-openclaw plugins install npm-pack:.\local-openclaw-supabase-bridge-0.2.1.tgz
+openclaw plugins install npm-pack:.\local-openclaw-supabase-bridge-0.2.2.tgz
 openclaw plugins enable supabase-bridge
 ```
 
