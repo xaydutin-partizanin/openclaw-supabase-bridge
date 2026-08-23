@@ -2,6 +2,7 @@ import { arch, freemem, hostname, platform, release } from "node:os";
 import { asBoolean, asRecord, asString } from "../../object-utils.js";
 import type { TelemetryRow } from "../../types.js";
 import { json, nullableString, observedRow, safeMetadata, stableHash, stableKey, write } from "../collector-utils.js";
+import { adaptiveStaleAfterMs } from "../freshness.js";
 import { agentIdFromSessionKey, listAllSessionEntries, listConfiguredAgents } from "../public-runtime.js";
 import type { CollectorContext, CollectorResult, TelemetryCollector } from "../types.js";
 
@@ -13,7 +14,7 @@ export const gatewayCollector: TelemetryCollector = {
   intervalMs: MINUTE,
   activeIntervalMs: 15_000,
   maxIntervalMs: 5 * MINUTE,
-  staleAfterMs: 3 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(MINUTE, 5 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const root = asRecord(context.cfg);
@@ -86,7 +87,7 @@ export const agentsCollector: TelemetryCollector = {
   domain: "agents",
   intervalMs: 5 * MINUTE,
   maxIntervalMs: 30 * MINUTE,
-  staleAfterMs: 15 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(5 * MINUTE, 30 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
@@ -148,9 +149,7 @@ export const sessionsCollector: TelemetryCollector = {
   intervalMs: 2 * MINUTE,
   activeIntervalMs: 15_000,
   maxIntervalMs: 15 * MINUTE,
-  // Keep idle session rows fresh through the longest adaptive polling interval,
-  // with one base interval of tolerance for scheduler/network jitter.
-  staleAfterMs: 20 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(2 * MINUTE, 15 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
@@ -261,7 +260,7 @@ export const tasksCollector: TelemetryCollector = {
   intervalMs: MINUTE,
   activeIntervalMs: 10_000,
   maxIntervalMs: 10 * MINUTE,
-  staleAfterMs: 3 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(MINUTE, 10 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
@@ -361,7 +360,7 @@ export const channelsCollector: TelemetryCollector = {
   domain: "channels",
   intervalMs: 2 * MINUTE,
   maxIntervalMs: 15 * MINUTE,
-  staleAfterMs: 5 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(2 * MINUTE, 15 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
@@ -413,7 +412,7 @@ export const pluginsCollector: TelemetryCollector = {
   domain: "plugins",
   intervalMs: 10 * MINUTE,
   maxIntervalMs: 60 * MINUTE,
-  staleAfterMs: 30 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(10 * MINUTE, 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
@@ -482,7 +481,7 @@ export const gatewayConfigCollector: TelemetryCollector = {
   domain: "configuration",
   intervalMs: 30 * MINUTE,
   maxIntervalMs: 2 * 60 * MINUTE,
-  staleAfterMs: 60 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(30 * MINUTE, 2 * 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const root = asRecord(context.cfg);

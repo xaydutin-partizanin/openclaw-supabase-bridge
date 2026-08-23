@@ -1,5 +1,6 @@
 import type { TelemetryRow } from "../../types.js";
 import { json, observedRow, stableKey, write } from "../collector-utils.js";
+import { adaptiveStaleAfterMs } from "../freshness.js";
 import { listConfiguredAgents } from "../public-runtime.js";
 import type { CollectorContext, CollectorResult, TelemetryCollector } from "../types.js";
 import { unsupportedCollectorResult } from "../unsupported.js";
@@ -11,7 +12,7 @@ export const cronCollector: TelemetryCollector = {
   domain: "cron",
   intervalMs: 10 * MINUTE,
   maxIntervalMs: 60 * MINUTE,
-  staleAfterMs: 30 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(10 * MINUTE, 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     return unsupportedCollectorResult({
@@ -28,7 +29,7 @@ export const projectsCollector: TelemetryCollector = {
   domain: "projects-workspaces-worktrees",
   intervalMs: 10 * MINUTE,
   maxIntervalMs: 60 * MINUTE,
-  staleAfterMs: 30 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(10 * MINUTE, 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
@@ -107,7 +108,7 @@ export const nodesCollector: TelemetryCollector = {
   domain: "nodes-devices",
   intervalMs: 5 * MINUTE,
   maxIntervalMs: 30 * MINUTE,
-  staleAfterMs: 15 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(5 * MINUTE, 30 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
@@ -141,7 +142,7 @@ export const approvalsSecurityCollector: TelemetryCollector = {
   intervalMs: 10 * MINUTE,
   activeIntervalMs: 30_000,
   maxIntervalMs: 60 * MINUTE,
-  staleAfterMs: 30 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(10 * MINUTE, 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     return unsupportedCollectorResult({
@@ -158,7 +159,7 @@ export const memoryPolicyCollector: TelemetryCollector = {
   domain: "memory-policy-documents",
   intervalMs: 60 * MINUTE,
   maxIntervalMs: 4 * 60 * MINUTE,
-  staleAfterMs: 2 * 60 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(60 * MINUTE, 4 * 60 * MINUTE),
   eventDriven: false,
   async run(context): Promise<CollectorResult> {
     return unsupportedCollectorResult({

@@ -9,7 +9,7 @@
     "tables": ["openclaw_instances", "gateway_status", "gateway_metric_samples"],
     "sensitiveExcluded": ["IP addresses", "credentials", "raw config"],
     "writeCapability": false,
-    "freshnessTarget": "3m",
+    "freshnessTarget": "10m max-idle freshness; event-driven refresh while active",
     "limitation": "External plugins cannot read Gateway event-loop, disk, or plugin-error health metrics"
   },
   {
@@ -35,7 +35,7 @@
     "tables": ["gateway_config_state"],
     "sensitiveExcluded": ["all values except safe IDs/model refs", "SecretRef bodies"],
     "writeCapability": false,
-    "freshnessTarget": "60m",
+    "freshnessTarget": "150m max-idle freshness",
     "limitation": "Not a complete configuration mirror"
   },
   {
@@ -61,7 +61,7 @@
     "tables": ["models", "model_auth_status"],
     "sensitiveExcluded": ["secret material", "token values"],
     "writeCapability": false,
-    "freshnessTarget": "30m",
+    "freshnessTarget": "75m max-idle freshness",
     "limitation": "Auth status is operational, not credential content"
   },
   {
@@ -100,7 +100,7 @@
     "tables": ["openclaw_agents", "agent_bindings"],
     "sensitiveExcluded": ["agent file contents", "prompts"],
     "writeCapability": "task target only",
-    "freshnessTarget": "15m",
+    "freshnessTarget": "35m max-idle freshness; event-driven refresh",
     "limitation": "Only public bindings and workspace metadata are visible"
   },
   {
@@ -113,7 +113,7 @@
     "tables": ["acp_backends", "agent_harnesses"],
     "sensitiveExcluded": ["backend environment", "tokens", "command line"],
     "writeCapability": "task target/config only",
-    "freshnessTarget": "30m",
+    "freshnessTarget": "75m max-idle freshness",
     "limitation": "Cursor internal model and quota are not exposed by ACPX"
   },
   {
@@ -139,7 +139,7 @@
     "tables": ["openclaw_tasks", "task_flows", "task_flow_members"],
     "sensitiveExcluded": ["task prompt/body", "transcript"],
     "writeCapability": false,
-    "freshnessTarget": "3m",
+    "freshnessTarget": "15m max-idle freshness; event-driven refresh while active",
     "limitation": "Bridge does not replace or auto-drive Task Flow"
   },
   {
@@ -165,7 +165,7 @@
     "tables": ["channel_accounts"],
     "sensitiveExcluded": ["channel credentials", "message content"],
     "writeCapability": false,
-    "freshnessTarget": "5m",
+    "freshnessTarget": "20m max-idle freshness",
     "limitation": "Generic per-channel live connection state is not exposed to external plugins"
   },
   {
@@ -178,7 +178,7 @@
     "tables": ["openclaw_plugins", "plugin_hooks"],
     "sensitiveExcluded": ["plugin config values"],
     "writeCapability": false,
-    "freshnessTarget": "30m",
+    "freshnessTarget": "70m max-idle freshness",
     "limitation": "Other configured plugins cannot be proven loaded and full third-party hook internals are not enumerated"
   },
   {
@@ -217,7 +217,7 @@
     "tables": ["mcp_servers"],
     "sensitiveExcluded": ["commands", "arguments", "environment", "credentials"],
     "writeCapability": false,
-    "freshnessTarget": "60m",
+    "freshnessTarget": "150m max-idle freshness",
     "limitation": "No public global MCP health registry was found"
   },
   {
@@ -230,7 +230,7 @@
     "tables": ["execution_policies"],
     "sensitiveExcluded": ["allow/deny rule values", "environment"],
     "writeCapability": false,
-    "freshnessTarget": "60m",
+    "freshnessTarget": "150m max-idle freshness",
     "limitation": "Counts/modes only; per-run enforcement may be narrower"
   },
   {
@@ -295,7 +295,7 @@
     "tables": ["projects", "workspaces", "worktrees"],
     "sensitiveExcluded": ["file contents", "Git credentials"],
     "writeCapability": "configured project/workspace task placement only",
-    "freshnessTarget": "30m",
+    "freshnessTarget": "70m max-idle freshness; event-driven refresh",
     "limitation": "Local workspace paths are retained for exact placement; managed-worktree inventory is unsupported"
   },
   {
@@ -308,7 +308,7 @@
     "tables": ["nodes", "devices"],
     "sensitiveExcluded": ["IP addresses", "pairing credentials", "keys", "media", "location"],
     "writeCapability": false,
-    "freshnessTarget": "15m",
+    "freshnessTarget": "35m max-idle freshness; event-driven refresh",
     "limitation": "Device pairing inventory and node task placement are unsupported for external plugins"
   },
   {

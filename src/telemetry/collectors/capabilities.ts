@@ -2,6 +2,7 @@ import { asRecord, asString } from "../../object-utils.js";
 import { discoverInventory } from "../../inventory.js";
 import type { TelemetryRow } from "../../types.js";
 import { json, nullableString, observedRow, stableKey, write } from "../collector-utils.js";
+import { adaptiveStaleAfterMs } from "../freshness.js";
 import { listConfiguredAgents, listConfiguredModelRefs } from "../public-runtime.js";
 import type { CollectorContext, CollectorResult, TelemetryCollector } from "../types.js";
 import { unsupportedCollectorResult } from "../unsupported.js";
@@ -13,7 +14,7 @@ export const modelsCollector: TelemetryCollector = {
   domain: "models",
   intervalMs: 15 * MINUTE,
   maxIntervalMs: 60 * MINUTE,
-  staleAfterMs: 30 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(15 * MINUTE, 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const observedAt = context.now.toISOString();
@@ -115,7 +116,7 @@ export const toolsCollector: TelemetryCollector = {
   domain: "tools",
   intervalMs: 30 * MINUTE,
   maxIntervalMs: 2 * 60 * MINUTE,
-  staleAfterMs: 60 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(30 * MINUTE, 2 * 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     return unsupportedCollectorResult({
@@ -132,7 +133,7 @@ export const skillsCollector: TelemetryCollector = {
   domain: "skills",
   intervalMs: 30 * MINUTE,
   maxIntervalMs: 2 * 60 * MINUTE,
-  staleAfterMs: 60 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(30 * MINUTE, 2 * 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     return unsupportedCollectorResult({
@@ -149,7 +150,7 @@ export const executionPolicyCollector: TelemetryCollector = {
   domain: "execution-policy",
   intervalMs: 30 * MINUTE,
   maxIntervalMs: 2 * 60 * MINUTE,
-  staleAfterMs: 60 * MINUTE,
+  staleAfterMs: adaptiveStaleAfterMs(30 * MINUTE, 2 * 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
     const root = asRecord(context.cfg);

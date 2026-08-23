@@ -1,5 +1,12 @@
 import type { FreshnessState, TelemetryRow } from "../types.js";
 
+const MINIMUM_POLLING_GRACE_MS = 5 * 60_000;
+
+export function adaptiveStaleAfterMs(intervalMs: number, maxIntervalMs = intervalMs): number {
+  const maximumPollingIntervalMs = Math.max(intervalMs, maxIntervalMs);
+  return maximumPollingIntervalMs + Math.max(intervalMs, MINIMUM_POLLING_GRACE_MS);
+}
+
 export function freshnessFields(input: {
   observedAt: string;
   ingestedAt?: string;

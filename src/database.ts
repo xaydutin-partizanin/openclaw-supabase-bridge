@@ -196,7 +196,7 @@ export class SupabaseBridgeDatabase implements BridgeDatabase {
   constructor(url: string, credential: string) {
     this.#client = createClient(url, credential, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-      global: { headers: { "X-Client-Info": "openclaw-supabase-bridge/0.2.2" } },
+      global: { headers: { "X-Client-Info": "openclaw-supabase-bridge/0.2.3" } },
       realtime: { params: { eventsPerSecond: 5 } },
     });
   }

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { freshnessAt, freshnessFields } from "../src/telemetry/freshness.js";
+import { capabilityCollectors } from "../src/telemetry/collectors/capabilities.js";
+import { coreCollectors } from "../src/telemetry/collectors/core.js";
+import { operationCollectors } from "../src/telemetry/collectors/operations.js";
+import { adaptiveStaleAfterMs, freshnessAt, freshnessFields } from "../src/telemetry/freshness.js";
 
 describe("telemetry freshness", () => {
   it("transitions from fresh to stale at the explicit deadline", () => {
@@ -12,5 +15,12 @@ describe("telemetry freshness", () => {
   it("keeps explicit error and missing deadlines from appearing healthy", () => {
     expect(freshnessAt(new Date(), null)).toBe("stale");
     expect(freshnessAt(new Date(), "2099-01-01T00:00:00.000Z", true)).toBe("error");
+  });
+
+  it("keeps every collector row deadline beyond its maximum adaptive poll interval", () => {
+    expect(adaptiveStaleAfterMs(2 * 60_000, 15 * 60_000)).toBe(20 * 60_000);
+    for (const collector of [...coreCollectors, ...capabilityCollectors, ...operationCollectors]) {
+      expect(collector.staleAfterMs, collector.id).toBeGreaterThan(collector.maxIntervalMs ?? collector.intervalMs);
+    }
   });
 });
