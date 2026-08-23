@@ -188,6 +188,8 @@ export interface PluginConfig {
   supabaseUrl: string | null;
   supabaseCredential: string | null;
   credentialConfigured: boolean;
+  /** Optional Cursor User API Key (SecretRef-resolved). Prefer over local session for daemons. */
+  cursorUserApiKey: string | null;
   workerId: string;
   quotaRefreshIntervalMinutes: number;
   eventLoggingEnabled: boolean;

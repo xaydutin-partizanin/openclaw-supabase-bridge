@@ -12,6 +12,10 @@
         {
           "path": "supabaseCredential",
           "expected": "string"
+        },
+        {
+          "path": "cursorUserApiKey",
+          "expected": "string"
         }
       ]
     }
@@ -23,6 +27,7 @@
       "enabled": { "type": "boolean", "default": false },
       "supabaseUrl": { "type": "string", "minLength": 1 },
       "supabaseCredential": { "type": ["string", "object"] },
+      "cursorUserApiKey": { "type": ["string", "object"] },
       "workerId": { "type": "string", "minLength": 1 },
       "instanceKey": { "type": "string", "minLength": 1 },
       "quotaRefreshIntervalMinutes": { "type": "integer", "minimum": 1, "maximum": 1440, "default": 15 },

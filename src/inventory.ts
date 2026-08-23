@@ -23,6 +23,7 @@ function providerDisplayName(provider: string): string {
 
 function providerQuotaCapability(provider: string): string {
   if (provider === "openai" || provider === "deepseek") return "provider_usage_endpoint";
+  if (provider === "cursor") return "cursor_internal_api";
   return "unsupported";
 }
 

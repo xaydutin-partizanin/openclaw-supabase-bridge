@@ -103,7 +103,7 @@ Quota refresh runs at startup, periodically (15 minutes by default), after every
 
 - OpenAI: OpenClaw’s public Codex/OpenAI usage adapter is queried. Provider-reported used percentages are represented as honest percentage buckets with reset times.
 - DeepSeek: OpenClaw’s public DeepSeek usage adapter is queried. Balances/budgets are represented in their provider units.
-- Cursor ACP: remaining allowance is `UNSUPPORTED` unless a future authoritative provider adapter becomes available. Generic OpenClaw token counters are not treated as Cursor quota.
+- Cursor: when a local Cursor login or optional `cursorUserApiKey` SecretRef is available, the bridge calls Cursor’s authenticated internal DashboardService (`GetCurrentPeriodUsage` / `GetPlanInfo`) and stores Cursor Models / Other Models / total percent windows plus included allowance cents. Source is recorded as `cursor_internal_api` (undocumented provider interface — not a public billing API). Generic ACP/session token counters are never treated as Cursor quota. If no auth source exists, Cursor remains `unsupported`.
 - Unknown providers: `UNSUPPORTED` or `UNKNOWN`; no allowance is invented.
 
 Quota errors never stop task execution.
@@ -137,6 +137,8 @@ Example single-value file provider (paths are illustrative):
             provider: "supabasebridge",
             id: "value"
           },
+          // Optional. Preferred for long-running daemons when available.
+          // cursorUserApiKey: { source: "file", provider: "cursoruser", id: "value" },
           quotaRefreshIntervalMinutes: 15,
           eventLoggingEnabled: true,
           eventMaxPayloadBytes: 65536,
@@ -212,7 +214,8 @@ Tests cover the v0.1 behavior plus exact new/continue targeting, explicit unsupp
 - **Realtime connects but tasks do not run:** verify the migration and `supabase_realtime` publication membership, then inspect expired leases and Gateway logs.
 - **Task uses the default unexpectedly:** inspect `runs.fallback_reason` and the current `agent_configs` row.
 - **Cursor model looks like OpenAI in generic session UI:** treat the Cursor ACP harness/dashboard as authoritative; this bridge intentionally stores the internal Cursor model as unknown.
-- **Quota is unsupported:** this is expected when no authoritative provider usage adapter exists.
+- **Quota is unsupported:** expected for providers without an adapter, or for Cursor when neither a local Cursor login nor `cursorUserApiKey` is available.
+- **Cursor quota source:** `cursor_internal_api` is an authenticated undocumented Cursor interface. Treat schema changes as hard failures that surface as `error`/`unsupported`, never as invented remaining allowance.
 - **v0.2 collector errors mention missing tables:** the additive migration was not applied; keep or restore the v0.1.2 package until it is.
 - **Exact target failed:** inspect the safe error code; the bridge intentionally refuses to retarget stale or mismatched work.
 

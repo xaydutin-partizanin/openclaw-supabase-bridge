@@ -36,12 +36,15 @@ export function resolvePluginConfig(cfg: OpenClawConfig): PluginConfig {
   const resolvedCredential = asString(credential);
   const credentialConfigured = resolvedCredential !== null || isRecord(credential);
   const enabled = asBoolean(raw.enabled, false) && asBoolean(channel.enabled, false);
+  const cursorUserApiKeyRaw = raw.cursorUserApiKey;
+  const cursorUserApiKey = asString(cursorUserApiKeyRaw);
 
   return {
     enabled,
     supabaseUrl: asString(raw.supabaseUrl),
     supabaseCredential: resolvedCredential,
     credentialConfigured,
+    cursorUserApiKey,
     workerId: asString(raw.workerId) ?? defaultWorkerId(),
     quotaRefreshIntervalMinutes: asBoundedInteger(raw.quotaRefreshIntervalMinutes, 15, 1, 1440),
     eventLoggingEnabled: asBoolean(raw.eventLoggingEnabled, true),

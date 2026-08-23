@@ -1,5 +1,7 @@
 import type { OpenClawConfig, OpenClawPluginApi, ProviderUsageSnapshot } from "openclaw/plugin-sdk/core";
 import { fetchCodexUsage, fetchDeepSeekUsage } from "openclaw/plugin-sdk/provider-usage";
+import { resolvePluginConfig } from "./config.js";
+import { collectCursorQuotaStatus } from "./cursor-quota/index.js";
 import { errorMessage } from "./object-utils.js";
 import { sanitizeEventData } from "./sanitizer.js";
 import type { InventoryIds, InventorySnapshot, Json, QuotaStatus } from "./types.js";
@@ -170,6 +172,21 @@ export class QuotaCollector {
       if (!providerId) continue;
       if (!provider.available) {
         rows.push({ ...unsupportedQuotaRow(provider.providerKey, providerId, checkedAt), status: "unknown", other: { reason: "provider_unavailable" } });
+        continue;
+      }
+      if (provider.providerKey === "cursor") {
+        try {
+          const pluginConfig = resolvePluginConfig(this.#cfg);
+          rows.push(
+            ...(await collectCursorQuotaStatus({
+              providerId,
+              checkedAt,
+              userApiKey: pluginConfig.cursorUserApiKey,
+            })),
+          );
+        } catch (error) {
+          rows.push(errorQuotaRow(provider.providerKey, providerId, checkedAt, error));
+        }
         continue;
       }
       if (provider.providerKey !== "openai" && provider.providerKey !== "deepseek") {

@@ -75,7 +75,7 @@
     "sensitiveExcluded": ["account credentials", "dashboard cookies"],
     "writeCapability": false,
     "freshnessTarget": "45m view threshold",
-    "limitation": "OpenAI and DeepSeek supported; Cursor quota unsupported"
+    "limitation": "OpenAI and DeepSeek via public usage adapters; Cursor via authenticated internal DashboardService (cursor_internal_api) when local login or cursorUserApiKey is available"
   },
   {
     "domain": "per-run-model-usage",
@@ -114,7 +114,7 @@
     "sensitiveExcluded": ["backend environment", "tokens", "command line"],
     "writeCapability": "task target/config only",
     "freshnessTarget": "75m max-idle freshness",
-    "limitation": "Cursor internal model and quota are not exposed by ACPX"
+    "limitation": "Cursor internal Auto model selection remains non-authoritative via ACPX; quota/usage is collected separately through cursor_internal_api when authenticated"
   },
   {
     "domain": "sessions",
