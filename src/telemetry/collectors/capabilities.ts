@@ -1,13 +1,16 @@
-import { asRecord, asString } from "../../object-utils.js";
+import { asBoolean, asRecord, asString } from "../../object-utils.js";
 import { discoverInventory } from "../../inventory.js";
 import type { TelemetryRow } from "../../types.js";
-import { json, nullableString, observedRow, stableKey, write } from "../collector-utils.js";
+import { json, nullableString, observedRow, rows, stableKey, write } from "../collector-utils.js";
 import { adaptiveStaleAfterMs } from "../freshness.js";
-import { listConfiguredAgents, listConfiguredModelRefs } from "../public-runtime.js";
+import { agentIdFromSessionKey, listAllSessionEntries, listConfiguredAgents, listConfiguredModelRefs } from "../public-runtime.js";
 import type { CollectorContext, CollectorResult, TelemetryCollector } from "../types.js";
-import { unsupportedCollectorResult } from "../unsupported.js";
 
 const MINUTE = 60_000;
+
+async function request(context: CollectorContext, method: string, params?: Record<string, unknown>): Promise<unknown> {
+  return context.api.runtime.gateway.request(method, params);
+}
 
 export const modelsCollector: TelemetryCollector = {
   id: "models",
@@ -119,12 +122,71 @@ export const toolsCollector: TelemetryCollector = {
   staleAfterMs: adaptiveStaleAfterMs(30 * MINUTE, 2 * 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    return unsupportedCollectorResult({
-      context,
-      domain: "tools-catalog-and-effective-agent-tools",
-      reason: "OpenClaw 2026.7.1-2 exposes tools.catalog/tools.effective only through trusted Gateway requests; no equivalent external-plugin read helper exists.",
-      staleAfterMs: this.staleAfterMs,
-    });
+    const observedAt = context.now.toISOString();
+    const configuredAgents = listConfiguredAgents(context.api, context.cfg);
+    const effectiveToolNames = new Map<string, Set<string>>();
+    for (const session of listAllSessionEntries(context.api, context.cfg)) {
+      const agentId = agentIdFromSessionKey(session.sessionKey);
+      if (effectiveToolNames.has(agentId)) continue;
+      const effective = asRecord(await request(context, "tools.effective", { agentId, sessionKey: session.sessionKey }));
+      const names = new Set<string>();
+      for (const group of Array.isArray(effective.groups) ? effective.groups.map(asRecord) : []) {
+        for (const tool of Array.isArray(group.tools) ? group.tools.map(asRecord) : []) {
+          const name = asString(tool.id) ?? asString(tool.name);
+          if (name) names.add(name);
+        }
+      }
+      effectiveToolNames.set(agentId, names);
+    }
+    const toolRows = new Map<string, TelemetryRow>();
+    const agentToolRows: TelemetryRow[] = [];
+    for (const agent of configuredAgents) {
+      const catalog = asRecord(await request(context, "tools.catalog", { agentId: agent.id }));
+      const effective = effectiveToolNames.get(agent.id);
+      for (const group of Array.isArray(catalog.groups) ? catalog.groups.map(asRecord) : []) {
+        const groupPluginId = asString(group.pluginId) ?? (asString(group.source) === "core" ? "core" : "plugin");
+        for (const tool of Array.isArray(group.tools) ? group.tools.map(asRecord) : []) {
+          const name = asString(tool.id) ?? asString(tool.name);
+          if (!name) continue;
+          const pluginId = asString(tool.pluginId) ?? groupPluginId;
+          const toolKey = stableKey(context.instanceKey, pluginId, name);
+          toolRows.set(toolKey, observedRow({
+            row: {
+              tool_key: toolKey,
+              instance_key: context.instanceKey,
+              tool_name: name,
+              plugin_id: pluginId,
+              display_name: nullableString(tool.label) ?? nullableString(tool.displayName),
+              description: nullableString(tool.description),
+              risk: nullableString(tool.risk),
+              available: tool.optional === true ? false : true,
+              metadata: json({ source: nullableString(tool.source) ?? nullableString(group.source), tags: tool.tags ?? [], default_profiles: tool.defaultProfiles ?? [] }),
+            },
+            observedAt,
+            staleAfterMs: this.staleAfterMs,
+            bootId: context.bootId,
+          }));
+          agentToolRows.push(observedRow({
+            row: {
+              agent_tool_key: stableKey(context.instanceKey, agent.id, toolKey),
+              instance_key: context.instanceKey,
+              agent_id: agent.id,
+              tool_key: toolKey,
+              enabled: effective ? effective.has(name) : true,
+              authority: effective ? "gateway_rpc:tools.effective (latest session)" : "gateway_rpc:tools.catalog (no session to evaluate)",
+            },
+            observedAt,
+            staleAfterMs: this.staleAfterMs,
+            bootId: context.bootId,
+          }));
+        }
+      }
+    }
+    return {
+      authority: "gateway_rpc:tools.catalog+tools.effective",
+      observedAt,
+      writes: [write("tools", "tool_key", [...toolRows.values()]), write("agent_tools", "agent_tool_key", agentToolRows)],
+    };
   },
 };
 
@@ -136,12 +198,59 @@ export const skillsCollector: TelemetryCollector = {
   staleAfterMs: adaptiveStaleAfterMs(30 * MINUTE, 2 * 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    return unsupportedCollectorResult({
-      context,
-      domain: "skills-catalog-and-agent-eligibility",
-      reason: "OpenClaw 2026.7.1-2 exposes skills.status only through trusted Gateway requests; session snapshots are incomplete and are not a supported global skills inventory.",
-      staleAfterMs: this.staleAfterMs,
-    });
+    const observedAt = context.now.toISOString();
+    const skillMap = new Map<string, TelemetryRow>();
+    const agentSkillRows: TelemetryRow[] = [];
+    for (const agent of listConfiguredAgents(context.api, context.cfg)) {
+      const status = asRecord(await request(context, "skills.status", { agentId: agent.id }));
+      for (const skill of rows(status, "skills")) {
+        const name = asString(skill.name) ?? asString(skill.skillKey);
+        if (!name) continue;
+        const source = asString(skill.source) ?? "unknown";
+        const skillKey = stableKey(context.instanceKey, source, name);
+        skillMap.set(skillKey, observedRow({
+          row: {
+            skill_key: skillKey,
+            instance_key: context.instanceKey,
+            skill_name: name,
+            source,
+            bundled: asBoolean(skill.bundled, false),
+            eligible: asBoolean(skill.eligible, false),
+            disabled: asBoolean(skill.disabled, false),
+            user_invocable: asBoolean(skill.userInvocable, false),
+            command_visible: asBoolean(skill.commandVisible, false),
+            file_path: nullableString(skill.filePath),
+            requirements: json({
+              bins: asRecord(skill.requirements).bins ?? [],
+              config: asRecord(skill.requirements).config ?? [],
+              os: asRecord(skill.requirements).os ?? [],
+              environment_names_excluded: true,
+            }),
+          },
+          observedAt,
+          staleAfterMs: this.staleAfterMs,
+          bootId: context.bootId,
+        }));
+        agentSkillRows.push(observedRow({
+          row: {
+            agent_skill_key: stableKey(context.instanceKey, agent.id, skillKey),
+            instance_key: context.instanceKey,
+            agent_id: agent.id,
+            skill_key: skillKey,
+            eligible: asBoolean(skill.eligible, false),
+            enabled: !asBoolean(skill.disabled, false),
+          },
+          observedAt,
+          staleAfterMs: this.staleAfterMs,
+          bootId: context.bootId,
+        }));
+      }
+    }
+    return {
+      authority: "gateway_rpc:skills.status",
+      observedAt,
+      writes: [write("skills", "skill_key", [...skillMap.values()]), write("agent_skills", "agent_skill_key", agentSkillRows)],
+    };
   },
 };
 

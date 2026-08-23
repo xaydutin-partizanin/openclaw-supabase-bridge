@@ -1,11 +1,15 @@
+import { asBoolean, asRecord, asString } from "../../object-utils.js";
 import type { TelemetryRow } from "../../types.js";
-import { json, observedRow, stableKey, write } from "../collector-utils.js";
+import { json, nullableString, observedRow, rows, safeMetadata, stableHash, stableKey, write } from "../collector-utils.js";
 import { adaptiveStaleAfterMs } from "../freshness.js";
 import { listConfiguredAgents } from "../public-runtime.js";
 import type { CollectorContext, CollectorResult, TelemetryCollector } from "../types.js";
-import { unsupportedCollectorResult } from "../unsupported.js";
 
 const MINUTE = 60_000;
+
+async function request(context: CollectorContext, method: string, params?: Record<string, unknown>): Promise<unknown> {
+  return context.api.runtime.gateway.request(method, params);
+}
 
 export const cronCollector: TelemetryCollector = {
   id: "cron",
@@ -15,12 +19,40 @@ export const cronCollector: TelemetryCollector = {
   staleAfterMs: adaptiveStaleAfterMs(10 * MINUTE, 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    return unsupportedCollectorResult({
-      context,
-      domain: "cron-inventory",
-      reason: "OpenClaw 2026.7.1-2 exposes cron inventory only through trusted Gateway requests; the public session workflow API can schedule plugin-owned turns but cannot list all jobs.",
-      staleAfterMs: this.staleAfterMs,
+    const result = asRecord(await request(context, "cron.list", { includeDisabled: true }));
+    const observedAt = context.now.toISOString();
+    const jobs = (Array.isArray(result.jobs) ? result.jobs : Array.isArray(result) ? result : []).map(asRecord);
+    const mapped = jobs.flatMap((job): TelemetryRow[] => {
+      const id = asString(job.id);
+      if (!id) return [];
+      const schedule = asRecord(job.schedule);
+      const state = asRecord(job.state);
+      return [observedRow({
+        row: {
+          cron_key: stableKey(context.instanceKey, id),
+          instance_key: context.instanceKey,
+          cron_id: id,
+          agent_id: nullableString(job.agentId),
+          name: nullableString(job.name),
+          description: nullableString(job.description),
+          enabled: job.enabled === undefined ? true : asBoolean(job.enabled, false),
+          schedule_kind: nullableString(schedule.kind),
+          schedule_expression: nullableString(schedule.expr),
+          timezone: nullableString(schedule.tz),
+          session_target: nullableString(job.sessionTarget),
+          wake_mode: nullableString(job.wakeMode),
+          next_run_at: typeof state.nextRunAtMs === "number" ? new Date(state.nextRunAtMs).toISOString() : null,
+          last_run_at: typeof state.lastRunAtMs === "number" ? new Date(state.lastRunAtMs).toISOString() : null,
+          last_run_status: nullableString(state.lastRunStatus),
+          last_error: nullableString(state.lastError),
+          payload_body_excluded: true,
+        },
+        observedAt,
+        staleAfterMs: this.staleAfterMs,
+        bootId: context.bootId,
+      })];
     });
+    return { authority: "gateway_rpc:cron.list", observedAt, writes: [write("cron_jobs", "cron_key", mapped)] };
   },
 };
 
@@ -145,12 +177,53 @@ export const approvalsSecurityCollector: TelemetryCollector = {
   staleAfterMs: adaptiveStaleAfterMs(10 * MINUTE, 60 * MINUTE),
   eventDriven: true,
   async run(context): Promise<CollectorResult> {
-    return unsupportedCollectorResult({
-      context,
-      domain: "approvals-and-security-snapshots",
-      reason: "OpenClaw 2026.7.1-2 exposes approval and audit snapshots only through trusted Gateway requests. The bridge continues to capture sanitized approval/error lifecycle events incrementally.",
-      staleAfterMs: this.staleAfterMs,
+    const observedAt = context.now.toISOString();
+    const audit = asRecord(await request(context, "audit.list", { limit: 100 }));
+    const findings = (Array.isArray(audit.events) ? audit.events : Array.isArray(audit.findings) ? audit.findings : []).map(asRecord);
+    const findingRows = findings.flatMap((finding, index): TelemetryRow[] => {
+      const code = asString(finding.code) ?? asString(finding.type) ?? `audit-${index}`;
+      return [observedRow({
+        row: {
+          finding_key: stableHash(context.instanceKey, code, asString(finding.id) ?? index),
+          instance_key: context.instanceKey,
+          finding_id: nullableString(finding.id),
+          code,
+          severity: nullableString(finding.severity) ?? "info",
+          status: nullableString(finding.status) ?? "observed",
+          title: nullableString(finding.title) ?? nullableString(finding.message),
+          source: "gateway_audit",
+          sensitive_detail_excluded: true,
+          metadata: safeMetadata({ category: finding.category, subject: finding.subject }, 4_096),
+        },
+        observedAt,
+        staleAfterMs: this.staleAfterMs,
+        bootId: context.bootId,
+      })];
     });
+    return {
+      authority: "gateway_rpc:audit.list (approval inventory unsupported)",
+      observedAt,
+      writes: [
+        write("approvals", "approval_key", []),
+        write("security_findings", "finding_key", findingRows),
+        write("state_documents", "document_key", [{
+          ...observedRow({
+            row: {
+              document_key: stableKey(context.instanceKey, "unsupported", "approval-inventory"),
+              instance_key: context.instanceKey,
+              domain: "approval-inventory",
+              authority: "unsupported_by_openclaw_gateway",
+              supported: false,
+              document: json({ reason: "OpenClaw 2026.7.1-2 returns unknown method for exec.approval.list; audit.list remains available." }),
+            },
+            observedAt,
+            staleAfterMs: this.staleAfterMs,
+            bootId: context.bootId,
+          }),
+          freshness: "unsupported" as const,
+        }]),
+      ],
+    };
   },
 };
 
@@ -162,12 +235,83 @@ export const memoryPolicyCollector: TelemetryCollector = {
   staleAfterMs: adaptiveStaleAfterMs(60 * MINUTE, 4 * 60 * MINUTE),
   eventDriven: false,
   async run(context): Promise<CollectorResult> {
-    return unsupportedCollectorResult({
-      context,
-      domain: "memory-health-and-policy-documents",
-      reason: "OpenClaw 2026.7.1-2 exposes memory diagnostics and agent policy-file inventory only through trusted Gateway requests; the bridge will not scrape private OpenClaw state files.",
+    const observedAt = context.now.toISOString();
+    const memory = asRecord(await request(context, "doctor.memory.status"));
+    const embedding = asRecord(memory.embedding);
+    const dreaming = asRecord(memory.dreaming);
+    const memoryRow = observedRow({
+      row: {
+        memory_key: stableKey(context.instanceKey, asString(memory.agentId) ?? "main"),
+        instance_key: context.instanceKey,
+        agent_id: nullableString(memory.agentId) ?? "main",
+        provider: nullableString(memory.provider),
+        embedding_ready: asBoolean(embedding.ok, false),
+        embedding_checked: asBoolean(embedding.checked, false),
+        status: asBoolean(embedding.ok, false) ? "healthy" : "not_ready",
+        dreaming_enabled: asBoolean(dreaming.enabled, false),
+        short_term_count: typeof dreaming.shortTermCount === "number" ? dreaming.shortTermCount : null,
+        signal_count: typeof dreaming.totalSignalCount === "number" ? dreaming.totalSignalCount : null,
+        memory_contents_excluded: true,
+        last_error: nullableString(embedding.error),
+        metadata: {},
+      },
+      observedAt,
       staleAfterMs: this.staleAfterMs,
+      bootId: context.bootId,
     });
+    const documentRows: TelemetryRow[] = [];
+    for (const agent of listConfiguredAgents(context.api, context.cfg)) {
+      const files = asRecord(await request(context, "agents.files.list", { agentId: agent.id }));
+      for (const file of rows(files, "files")) {
+        const name = asString(file.name) ?? asString(file.path);
+        if (!name || !/^(AGENTS|SOUL|USER|TOOLS|HEARTBEAT|IDENTITY|MEMORY)\.md$/i.test(name.split(/[\\/]/).at(-1) ?? "")) continue;
+        documentRows.push(observedRow({
+          row: {
+            document_key: stableKey(context.instanceKey, agent.id, name),
+            instance_key: context.instanceKey,
+            agent_id: agent.id,
+            document_name: name.split(/[\\/]/).at(-1) ?? name,
+            path: nullableString(file.path) ?? name,
+            exists: true,
+            size_bytes: typeof file.size === "number" ? file.size : null,
+            modified_at: typeof file.mtimeMs === "number" ? new Date(file.mtimeMs).toISOString() : null,
+            contents_excluded: true,
+            metadata: {},
+          },
+          observedAt,
+          staleAfterMs: this.staleAfterMs,
+          bootId: context.bootId,
+        }));
+      }
+    }
+    const unsupportedRows: TelemetryRow[] = [
+      ["browser-profiles", "browser_profiles", "No public browser profile inventory RPC is exposed by OpenClaw 2026.7.1-2"],
+      ["global-security-audit", "security_findings", "Gateway audit events are available; the full CLI security audit is not exposed to third-party plugins"],
+    ].map(([documentKey, domain, reason]) => ({
+      ...observedRow({
+        row: {
+          document_key: stableKey(context.instanceKey, documentKey),
+          instance_key: context.instanceKey,
+          domain,
+          authority: "unsupported",
+          supported: false,
+          document: json({ reason }),
+        },
+        observedAt,
+        staleAfterMs: this.staleAfterMs,
+        bootId: context.bootId,
+      }),
+      freshness: "unsupported" as const,
+    }));
+    return {
+      authority: "gateway_rpc:doctor.memory.status+agents.files.list",
+      observedAt,
+      writes: [
+        write("memory_status", "memory_key", [memoryRow]),
+        write("policy_documents", "document_key", documentRows),
+        write("state_documents", "document_key", unsupportedRows),
+      ],
+    };
   },
 };
 

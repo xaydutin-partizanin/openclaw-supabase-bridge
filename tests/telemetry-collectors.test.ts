@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+import { skillsCollector, toolsCollector } from "../src/telemetry/collectors/capabilities.js";
 import { sessionsCollector, tasksCollector } from "../src/telemetry/collectors/core.js";
+import { approvalsSecurityCollector, cronCollector, memoryPolicyCollector } from "../src/telemetry/collectors/operations.js";
 import type { CollectorContext } from "../src/telemetry/types.js";
 
 const NOW = new Date("2026-08-22T12:00:00.000Z");
@@ -98,5 +100,47 @@ describe("safe session and task mirrors", () => {
     expect(JSON.stringify(result.writes)).not.toContain("DO NOT UPLOAD");
     expect(result.activity).toBe("active");
     expect(result.writes.find((item) => item.table === "task_flow_members")?.rows[0]).toMatchObject({ flow_id: "flow-1", openclaw_task_id: "task-1" });
+  });
+});
+
+describe("explicitly trusted Gateway telemetry", () => {
+  it("uses only read-only Gateway inventory methods for the restored collectors", async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === "cron.list") return { jobs: [] };
+      if (method === "audit.list") return { events: [] };
+      if (method === "doctor.memory.status") return { embedding: { ok: true, checked: true }, dreaming: { enabled: false } };
+      if (method === "agents.files.list") return { files: [] };
+      if (method === "tools.effective") return { groups: [{ tools: [{ id: "read" }] }] };
+      if (method === "tools.catalog") return { groups: [{ source: "core", tools: [{ id: "read", label: "Read" }] }] };
+      if (method === "skills.status") return { skills: [] };
+      throw new Error(`unexpected method ${method}`);
+    });
+    const api = {
+      runtime: {
+        gateway: { request },
+        agent: {
+          resolveAgentWorkspaceDir: () => "C:\\workspace",
+          resolveAgentIdentity: () => ({ name: "Main" }),
+          session: { listSessionEntries: () => [{ sessionKey: "agent:main:latest" }] },
+        },
+      },
+    };
+    const collectorContext = { ...context(api), cfg: { agents: { list: [{ id: "main" }] } } };
+
+    await cronCollector.run(collectorContext);
+    await approvalsSecurityCollector.run(collectorContext);
+    await memoryPolicyCollector.run(collectorContext);
+    await toolsCollector.run(collectorContext);
+    await skillsCollector.run(collectorContext);
+
+    expect(request.mock.calls.map(([method]) => method)).toEqual(expect.arrayContaining([
+      "cron.list",
+      "audit.list",
+      "doctor.memory.status",
+      "agents.files.list",
+      "tools.catalog",
+      "tools.effective",
+      "skills.status",
+    ]));
   });
 });
