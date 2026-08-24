@@ -27,6 +27,7 @@ import { coreCollectors } from "./telemetry/collectors/core.js";
 import { operationCollectors } from "./telemetry/collectors/operations.js";
 import { TelemetryManager } from "./telemetry/manager.js";
 import { TerminalWriter } from "./terminal-writer.js";
+import { terminalError, terminalStatus } from "./terminal-outcome.js";
 import type {
   AgentConfigRecord,
   BridgeEvent,
@@ -101,20 +102,6 @@ function extractReportText(result: Awaited<ReturnType<OpenClawPluginApi["runtime
   const raw = result.meta.finalAssistantRawText?.trim();
   if (raw) return raw;
   return "OpenClaw finished without a visible assistant report.";
-}
-
-function terminalStatus(
-  result: Awaited<ReturnType<OpenClawPluginApi["runtime"]["agent"]["runEmbeddedAgent"]>>,
-): TerminalWriteInput["status"] {
-  if (result.meta.aborted) return result.meta.timeoutPhase ? "timed_out" : "cancelled";
-  if (result.meta.error || result.meta.failureSignal || result.payloads?.some((payload) => payload.isError)) return "failed";
-  return "completed";
-}
-
-function terminalError(
-  result: Awaited<ReturnType<OpenClawPluginApi["runtime"]["agent"]["runEmbeddedAgent"]>>,
-): string | null {
-  return result.meta.error?.message ?? result.meta.failureSignal?.message ?? null;
 }
 
 export class BridgeController {
