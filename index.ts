@@ -1,10 +1,10 @@
 import { defineChannelPluginEntry, type OpenClawPluginDefinition } from "openclaw/plugin-sdk/core";
 import { supabaseBridgePlugin } from "./src/channel.js";
+import { cleanupBridgeRuntimeLifecycle } from "./src/runtime-lifecycle.js";
 import {
   configureBridgeRuntime,
   handleBridgeAgentEvent,
   handleBridgeHook,
-  stopAllBridgeAccounts,
 } from "./src/runtime-registry.js";
 
 const supabaseBridgeEntry: OpenClawPluginDefinition = defineChannelPluginEntry({
@@ -48,9 +48,10 @@ const supabaseBridgeEntry: OpenClawPluginDefinition = defineChannelPluginEntry({
     api.on("gateway_stop", (event, context) => handleBridgeHook("gateway_stop", event, context));
     api.lifecycle.registerRuntimeLifecycle({
       id: "supabase-bridge-cleanup",
-      description: "Stop Supabase listeners, timers, and event buffers on plugin or Gateway cleanup.",
-      async cleanup() {
-        await stopAllBridgeAccounts();
+      description:
+        "Stop Supabase listeners/timers only on plugin or Gateway disable; ignore session reset/delete/restart.",
+      async cleanup(ctx) {
+        await cleanupBridgeRuntimeLifecycle(ctx);
       },
     });
   },

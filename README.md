@@ -221,7 +221,7 @@ Tests cover the v0.1 behavior plus exact new/continue targeting, explicit unsupp
 
 ## Restart and uninstall
 
-Gateway/plugin stop removes the Realtime channel, event subscription ownership, timers, and buffered resources. Repeated stop is idempotent.
+Gateway/plugin disable removes the Realtime channel, event subscription ownership, timers, and buffered resources. Session reset/delete/restart host-cleanup reasons are ignored by the bridge runtime lifecycle so a completed mission cannot tear down the global controller; account stop remains owned by the channel abort/`stopAccount` path. Repeated stop is idempotent.
 
 To remove the runtime integration while retaining database history:
 
