@@ -17,10 +17,16 @@ import {
   TaskNotificationCoordinator,
   type IngressQueueLike,
 } from "./notification-coordinator.js";
-import { errorMessage, toJson } from "./object-utils.js";
+import { asString, errorMessage, toJson } from "./object-utils.js";
 import { QuotaCollector } from "./quota.js";
 import { resolveTargetedExecutionConfig } from "./config-resolution.js";
 import { sanitizeEventData } from "./sanitizer.js";
+import {
+  childSessionLooksFailed,
+  listActiveChildSessions,
+  listChildSessions,
+  type ChildSessionSnapshot,
+} from "./child-sessions.js";
 import {
   findBusyCheckoutOccupant,
   listCheckoutOccupants,
@@ -31,7 +37,12 @@ import { coreCollectors } from "./telemetry/collectors/core.js";
 import { operationCollectors } from "./telemetry/collectors/operations.js";
 import { TelemetryManager } from "./telemetry/manager.js";
 import { TerminalWriter } from "./terminal-writer.js";
-import { terminalError, terminalStatus } from "./terminal-outcome.js";
+import {
+  extractReportText,
+  orchestrationHandedOff,
+  terminalError,
+  terminalStatus,
+} from "./terminal-outcome.js";
 import type {
   AgentConfigRecord,
   BridgeEvent,
@@ -69,6 +80,8 @@ const INVENTORY_STALE_MS = 5 * 60_000;
 const RECONCILIATION_INTERVAL_MS = 5 * 60_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
 const WORKSPACE_BUSY_POLL_MS = 5_000;
+const CHILD_APPEAR_GRACE_MS = 15_000;
+const CHILD_WAIT_POLL_MS = 5_000;
 
 function manualEvent(input: {
   taskId: string;
@@ -95,18 +108,6 @@ function manualEvent(input: {
     eventType: input.type,
     data: sanitizeEventData(input.data, input.maxPayloadBytes).value,
   };
-}
-
-function extractReportText(result: Awaited<ReturnType<OpenClawPluginApi["runtime"]["agent"]["runEmbeddedAgent"]>>): string {
-  const preferred = result.meta.finalAssistantVisibleText?.trim();
-  if (preferred) return preferred;
-  const visiblePayloads = (result.payloads ?? [])
-    .filter((payload) => !payload.isReasoning && !payload.isCommentary && payload.text?.trim())
-    .map((payload) => payload.text!.trim());
-  if (visiblePayloads.length) return visiblePayloads.at(-1)!;
-  const raw = result.meta.finalAssistantRawText?.trim();
-  if (raw) return raw;
-  return "OpenClaw finished without a visible assistant report.";
 }
 
 export class BridgeController {
@@ -587,13 +588,40 @@ export class BridgeController {
       }
 
       const result = await this.#api.runtime.agent.runEmbeddedAgent(params);
-      const status = terminalStatus(result);
-      const reportText = extractReportText(result);
+      const orchestrationEndedAt = new Date().toISOString();
+      const childWait = await this.#awaitImplementationChildren({
+        taskId: task.id,
+        runId,
+        parentSessionKey: sessionKey,
+        expectChildren: orchestrationHandedOff(result),
+        knownChildKeys: (result.acceptedSessionSpawns ?? [])
+          .map((spawn) => asString((spawn as { childSessionKey?: unknown }).childSessionKey))
+          .filter((key): key is string => Boolean(key)),
+        abortSignal: abortController.signal,
+      });
+      let status = terminalStatus(result);
+      let reportText = extractReportText(result);
+      let error = terminalError(result);
+      if (childWait.watched.length) {
+        const failedChildren = childWait.watched.filter(childSessionLooksFailed);
+        if (failedChildren.length) {
+          status = "failed";
+          error = `Implementation child session failed: ${failedChildren.map((child) => child.sessionKey).join(", ")}`;
+          if (!reportText || reportText.startsWith("Parent orchestration handed off")) {
+            reportText = error;
+          }
+        } else if (status === "failed" && orchestrationHandedOff(result) && !result.meta.error && !result.meta.failureSignal) {
+          status = "completed";
+          error = null;
+        }
+        if (status === "completed" && reportText.startsWith("Parent orchestration handed off")) {
+          reportText = `Implementation child session(s) finished: ${childWait.watched.map((child) => child.sessionKey).join(", ")}.`;
+        }
+      }
       const sourceRunId = this.#correlator.sourceRunIdForBridgeRun(runId);
       const isAcp = selected.runtime === "acp";
       const actualProvider = isAcp ? null : (result.meta.agentMeta?.provider ?? selected.providerKey);
       const actualModel = isAcp ? null : (result.meta.agentMeta?.model ?? selected.model);
-      const error = terminalError(result);
       const metadata = toJson({
         duration_ms: result.meta.durationMs,
         usage: result.meta.agentMeta?.usage,
@@ -601,6 +629,11 @@ export class BridgeController {
         completion: result.meta.completion,
         accepted_session_spawns: result.acceptedSessionSpawns,
         fallback_attempts: result.meta.agentMeta?.fallbackAttempts,
+        orchestration_ended_at: orchestrationEndedAt,
+        orchestration_handed_off: orchestrationHandedOff(result),
+        implementation_session_keys: childWait.watched.map((child) => child.sessionKey),
+        waited_for_child_sessions: childWait.waited,
+        implementation_complete: childWait.watched.length > 0 ? true : null,
         openclaw_reported_runtime: isAcp
           ? {
               provider: result.meta.agentMeta?.provider,
@@ -614,7 +647,14 @@ export class BridgeController {
         taskId: task.id,
         runId,
         type: `run_${status}`,
-        data: { status, error, duration_ms: result.meta.durationMs },
+        data: {
+          status,
+          error,
+          duration_ms: result.meta.durationMs,
+          orchestration_handed_off: orchestrationHandedOff(result),
+          implementation_session_keys: childWait.watched.map((child) => child.sessionKey),
+          waited_for_child_sessions: childWait.waited,
+        },
         maxPayloadBytes: this.#config.eventMaxPayloadBytes,
       }));
       await this.#eventBuffer.flush();
@@ -632,6 +672,9 @@ export class BridgeController {
           actual_session_id: target.actualSessionId,
           actual_agent_id: target.agentId,
           session_policy: target.sessionPolicy,
+          orchestration_ended_at: orchestrationEndedAt,
+          implementation_session_keys: childWait.watched.map((child) => child.sessionKey),
+          waited_for_child_sessions: childWait.waited,
         },
         error,
         metadata,
@@ -670,6 +713,101 @@ export class BridgeController {
       await this.#refreshQuota("terminal_completion");
       setTimeout(() => this.#correlator.forgetBridgeRun(run.id), 30_000).unref?.();
     }
+  }
+
+  async #awaitImplementationChildren(input: {
+    taskId: string;
+    runId: string;
+    parentSessionKey: string;
+    expectChildren: boolean;
+    knownChildKeys: string[];
+    abortSignal: AbortSignal;
+  }): Promise<{ waited: boolean; watched: ChildSessionSnapshot[] }> {
+    const watchedKeys = new Set(input.knownChildKeys);
+    const graceDeadline = Date.now() + (input.expectChildren ? CHILD_APPEAR_GRACE_MS : 0);
+
+    const refreshWatched = (): ChildSessionSnapshot[] => {
+      const children = listChildSessions(this.#api, this.#cfg, input.parentSessionKey);
+      for (const child of children) watchedKeys.add(child.sessionKey);
+      const byKey = new Map(children.map((child) => [child.sessionKey, child]));
+      return [...watchedKeys].map((key) => byKey.get(key)).filter((child): child is ChildSessionSnapshot => Boolean(child));
+    };
+
+    let watched = refreshWatched();
+    let active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey);
+    while (input.expectChildren && active.length === 0 && watched.length === 0 && Date.now() < graceDeadline) {
+      if (input.abortSignal.aborted) throw new Error("Task cancelled while waiting for implementation children");
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, CHILD_WAIT_POLL_MS);
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new Error("Task cancelled while waiting for implementation children"));
+        };
+        input.abortSignal.addEventListener("abort", onAbort, { once: true });
+        timer.unref?.();
+      });
+      watched = refreshWatched();
+      active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey);
+    }
+
+    watched = refreshWatched();
+    active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey);
+    if (active.length === 0) {
+      return { waited: false, watched };
+    }
+
+    this.#logger.info("Supabase Bridge waiting for implementation children", {
+      taskId: input.taskId,
+      parentSessionKey: input.parentSessionKey,
+      childSessionKeys: active.map((child) => child.sessionKey),
+    });
+    this.#eventBuffer?.append(manualEvent({
+      taskId: input.taskId,
+      runId: input.runId,
+      type: "implementation_child_wait",
+      data: {
+        parent_session_key: input.parentSessionKey,
+        child_session_keys: active.map((child) => child.sessionKey),
+      },
+      maxPayloadBytes: this.#config.eventMaxPayloadBytes,
+    }));
+
+    while (!input.abortSignal.aborted) {
+      watched = refreshWatched();
+      for (const child of listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey)) {
+        watchedKeys.add(child.sessionKey);
+      }
+      active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey)
+        .filter((child) => watchedKeys.has(child.sessionKey));
+      if (active.length === 0) {
+        watched = refreshWatched();
+        this.#logger.info("Supabase Bridge implementation children finished", {
+          taskId: input.taskId,
+          childSessionKeys: watched.map((child) => child.sessionKey),
+        });
+        return { waited: true, watched };
+      }
+      this.#eventBuffer?.append(manualEvent({
+        taskId: input.taskId,
+        runId: input.runId,
+        type: "implementation_child_wait",
+        data: {
+          parent_session_key: input.parentSessionKey,
+          child_session_keys: active.map((child) => child.sessionKey),
+        },
+        maxPayloadBytes: this.#config.eventMaxPayloadBytes,
+      }));
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, CHILD_WAIT_POLL_MS);
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new Error("Task cancelled while waiting for implementation children"));
+        };
+        input.abortSignal.addEventListener("abort", onAbort, { once: true });
+        timer.unref?.();
+      });
+    }
+    throw new Error("Task cancelled while waiting for implementation children");
   }
 
   async #awaitClearCheckout(input: {
