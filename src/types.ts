@@ -56,6 +56,8 @@ export interface ExecutionTargetPlan {
   cwd: string;
   busyPolicy: TaskBusyPolicy;
   queuedForBusySession: boolean;
+  queuedForBusyWorkspace: boolean;
+  busyCheckoutSessionKey: string | null;
 }
 
 export interface ProviderRecord {

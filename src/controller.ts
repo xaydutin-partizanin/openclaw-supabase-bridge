@@ -21,7 +21,11 @@ import { errorMessage, toJson } from "./object-utils.js";
 import { QuotaCollector } from "./quota.js";
 import { resolveTargetedExecutionConfig } from "./config-resolution.js";
 import { sanitizeEventData } from "./sanitizer.js";
-import { resolveExecutionTarget } from "./task-targeting.js";
+import {
+  findBusyCheckoutOccupant,
+  listCheckoutOccupants,
+  resolveExecutionTarget,
+} from "./task-targeting.js";
 import { capabilityCollectors } from "./telemetry/collectors/capabilities.js";
 import { coreCollectors } from "./telemetry/collectors/core.js";
 import { operationCollectors } from "./telemetry/collectors/operations.js";
@@ -64,6 +68,7 @@ interface TaskPayload {
 const INVENTORY_STALE_MS = 5 * 60_000;
 const RECONCILIATION_INTERVAL_MS = 5 * 60_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
+const WORKSPACE_BUSY_POLL_MS = 5_000;
 
 function manualEvent(input: {
   taskId: string;
@@ -491,6 +496,8 @@ export class BridgeController {
         workspace_path: target.workspacePath,
         worktree_path: target.worktreePath,
         queued_for_busy_session: target.queuedForBusySession,
+        queued_for_busy_workspace: target.queuedForBusyWorkspace,
+        busy_checkout_session_key: target.busyCheckoutSessionKey,
       },
     };
     const run = await this.#database.startRun(startInput);
@@ -523,6 +530,8 @@ export class BridgeController {
         node_key: target.nodeKey,
         node_id: target.nodeId,
         cwd: target.cwd,
+        queued_for_busy_workspace: target.queuedForBusyWorkspace,
+        busy_checkout_session_key: target.busyCheckoutSessionKey,
       },
       maxPayloadBytes: this.#config.eventMaxPayloadBytes,
     }));
@@ -534,6 +543,16 @@ export class BridgeController {
     }, Math.max(20_000, Math.floor((this.#config.leaseDurationSeconds * 1_000) / 3)));
 
     try {
+      if (target.queuedForBusyWorkspace) {
+        await this.#awaitClearCheckout({
+          taskId: task.id,
+          runId,
+          cwd: target.cwd,
+          excludeSessionKey: target.sessionPolicy === "continue" ? target.actualSessionKey : null,
+          defaultWorkspace: this.#api.runtime.agent.resolveAgentWorkspaceDir(this.#cfg, selected.agent),
+          abortSignal: abortController.signal,
+        });
+      }
       const workspaceDir = this.#api.runtime.agent.resolveAgentWorkspaceDir(this.#cfg, selected.agent);
       const params: Parameters<OpenClawPluginApi["runtime"]["agent"]["runEmbeddedAgent"]>[0] = {
         runId,
@@ -650,5 +669,57 @@ export class BridgeController {
       await this.#refreshQuota("terminal_completion");
       setTimeout(() => this.#correlator.forgetBridgeRun(run.id), 30_000).unref?.();
     }
+  }
+
+  async #awaitClearCheckout(input: {
+    taskId: string;
+    runId: string;
+    cwd: string;
+    excludeSessionKey: string | null;
+    defaultWorkspace: string;
+    abortSignal: AbortSignal;
+  }): Promise<void> {
+    while (!input.abortSignal.aborted) {
+      const occupant = findBusyCheckoutOccupant(
+        input.cwd,
+        listCheckoutOccupants(this.#api, this.#cfg, input.defaultWorkspace),
+        input.excludeSessionKey,
+      );
+      if (!occupant) {
+        this.#logger.info("Supabase Bridge checkout became free", {
+          taskId: input.taskId,
+          cwd: input.cwd,
+        });
+        return;
+      }
+      this.#logger.info("Supabase Bridge waiting for busy checkout", {
+        taskId: input.taskId,
+        cwd: input.cwd,
+        busySessionKey: occupant.sessionKey,
+      });
+      this.#eventBuffer?.append(manualEvent({
+        taskId: input.taskId,
+        runId: input.runId,
+        type: "checkout_busy_wait",
+        data: {
+          cwd: input.cwd,
+          busy_session_key: occupant.sessionKey,
+        },
+        maxPayloadBytes: this.#config.eventMaxPayloadBytes,
+      }));
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, WORKSPACE_BUSY_POLL_MS);
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new Error("Task cancelled while waiting for a free checkout"));
+        };
+        if (input.abortSignal.aborted) {
+          onAbort();
+          return;
+        }
+        input.abortSignal.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+    throw new Error("Task cancelled while waiting for a free checkout");
   }
 }

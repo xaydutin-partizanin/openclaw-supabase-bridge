@@ -61,7 +61,7 @@ async function resolve(inputTarget: TaskTargetRecord | null, runtime = host()) {
 }
 
 describe("exact task targeting through public plugin runtime surfaces", () => {
-  it("preserves legacy isolated-session behavior without inventory reads", async () => {
+  it("preserves legacy isolated-session identity while still checking checkout occupancy", async () => {
     const runtime = host();
     const result = await resolve(null, runtime);
     expect(result).toMatchObject({
@@ -72,9 +72,9 @@ describe("exact task targeting through public plugin runtime surfaces", () => {
       actualSessionKey: `agent:main:supabase-bridge:${TASK_ID}`,
       actualSessionId: "new-session-id",
       cwd: MAIN_WORKSPACE,
+      queuedForBusyWorkspace: false,
     });
-    expect(runtime.listSessionEntries).not.toHaveBeenCalled();
-    expect(runtime.resolveAgentWorkspaceDir).not.toHaveBeenCalled();
+    expect(runtime.listSessionEntries).toHaveBeenCalled();
   });
 
   it("creates a clean new session at the exact configured workspace", async () => {
@@ -160,5 +160,74 @@ describe("exact task targeting through public plugin runtime surfaces", () => {
       sessionId: busy.entry.sessionId,
       busyPolicy: "reject",
     }), host({ sessions: [busy] }))).rejects.toMatchObject({ code: "target_busy" });
+  });
+
+  it("queues a new session when another active session already occupies the checkout", async () => {
+    const other = {
+      sessionKey: "agent:main:supabase-bridge:other-task",
+      entry: {
+        sessionId: "40000000-0000-4000-8000-000000000001",
+        status: "running",
+      },
+    };
+    const result = await resolve(target({
+      sessionPolicy: "new",
+      workspaceKey: "openclaw:test-host:agent:main",
+      workspacePath: MAIN_WORKSPACE,
+      busyPolicy: "queue",
+    }), host({ sessions: [SESSION, other] }));
+    expect(result).toMatchObject({
+      queuedForBusyWorkspace: true,
+      busyCheckoutSessionKey: other.sessionKey,
+      actualSessionId: "new-session-id",
+      cwd: MAIN_WORKSPACE,
+    });
+  });
+
+  it("rejects a new session when the checkout is occupied and busy_policy is reject", async () => {
+    const other = {
+      sessionKey: "agent:main:supabase-bridge:other-task",
+      entry: {
+        sessionId: "40000000-0000-4000-8000-000000000001",
+        status: "running",
+      },
+    };
+    await expect(resolve(target({
+      sessionPolicy: "new",
+      workspacePath: MAIN_WORKSPACE,
+      busyPolicy: "reject",
+    }), host({ sessions: [other] }))).rejects.toMatchObject({ code: "workspace_busy" });
+  });
+
+  it("does not treat the continued session as a foreign checkout occupant", async () => {
+    const busy = { ...SESSION, entry: { ...SESSION.entry, status: "running" } };
+    const result = await resolve(target({
+      sessionPolicy: "continue",
+      sessionKey: busy.sessionKey,
+      sessionId: busy.entry.sessionId,
+      busyPolicy: "queue",
+    }), host({ sessions: [busy] }));
+    expect(result).toMatchObject({
+      queuedForBusySession: true,
+      queuedForBusyWorkspace: false,
+      busyCheckoutSessionKey: null,
+    });
+  });
+
+  it("uses spawned cwd when present instead of the agent workspace fallback", async () => {
+    const other = {
+      sessionKey: "agent:main:child",
+      entry: {
+        sessionId: "40000000-0000-4000-8000-000000000002",
+        status: "running",
+        spawnedCwd: "F:\\RGAT-development\\.worktrees\\feature",
+      },
+    };
+    const result = await resolve(target({
+      sessionPolicy: "new",
+      workspacePath: MAIN_WORKSPACE,
+      busyPolicy: "queue",
+    }), host({ sessions: [other] }));
+    expect(result.queuedForBusyWorkspace).toBe(false);
   });
 });

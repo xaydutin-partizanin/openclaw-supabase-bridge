@@ -27,6 +27,8 @@ function plan(overrides: Partial<ExecutionTargetPlan> = {}): ExecutionTargetPlan
     cwd: "F:\\RGAT-development\\.worktrees\\one",
     busyPolicy: "queue",
     queuedForBusySession: false,
+    queuedForBusyWorkspace: false,
+    busyCheckoutSessionKey: null,
     ...overrides,
   };
 }

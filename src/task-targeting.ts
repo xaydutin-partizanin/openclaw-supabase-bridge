@@ -38,9 +38,63 @@ function stableTargetKey(...parts: Array<string | number | null | undefined>): s
   return parts.map((part) => String(part ?? "").trim().toLowerCase()).join(":");
 }
 
-function normalizedPath(value: string): string {
+export function normalizedCheckoutPath(value: string): string {
   const resolved = path.resolve(value);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function normalizedPath(value: string): string {
+  return normalizedCheckoutPath(value);
+}
+
+export interface CheckoutOccupant {
+  sessionKey: string;
+  sessionId: string;
+  agentId: string;
+  checkoutPath: string;
+}
+
+/** Write-capable checkout occupancy from live OpenClaw session entries. */
+export function listCheckoutOccupants(
+  api: OpenClawPluginApi,
+  cfg: OpenClawConfig,
+  defaultWorkspace: string,
+): CheckoutOccupant[] {
+  const agents = listConfiguredAgents(api, cfg);
+  const occupants: CheckoutOccupant[] = [];
+  for (const summary of listAllSessionEntries(api, cfg)) {
+    const candidate = sessionCandidate(summary);
+    if (!candidate?.hasActiveRun) continue;
+    const entry = asRecord(asRecord(summary).entry);
+    const spawned =
+      asString(entry.spawnedCwd) ??
+      asString(entry.spawnedWorkspaceDir) ??
+      asString(entry.cwd) ??
+      asString(entry.workspaceDir);
+    const agent = agents.find((row) => row.id === candidate.agentId);
+    const fallback = agent?.workspacePath || defaultWorkspace;
+    const checkout = spawned || fallback;
+    if (!checkout) continue;
+    occupants.push({
+      sessionKey: candidate.key,
+      sessionId: candidate.sessionId,
+      agentId: candidate.agentId,
+      checkoutPath: normalizedPath(checkout),
+    });
+  }
+  return occupants;
+}
+
+export function findBusyCheckoutOccupant(
+  cwd: string,
+  occupants: CheckoutOccupant[],
+  excludeSessionKey?: string | null,
+): CheckoutOccupant | null {
+  const wanted = normalizedPath(cwd);
+  return occupants.find((row) => {
+    if (excludeSessionKey && row.sessionKey === excludeSessionKey) return false;
+    return row.checkoutPath === wanted;
+  }) ?? null;
 }
 
 function sessionAgentId(key: string, explicit?: unknown): string {
@@ -223,7 +277,7 @@ export async function resolveExecutionTarget(input: {
 
   const sessionIdFactory = input.sessionIdFactory ?? randomUUID;
   if (legacy) {
-    return {
+    const legacyPlan: ExecutionTargetPlan = {
       legacy: true,
       requestedInstanceKey: null,
       instanceKey: input.instanceKey,
@@ -245,7 +299,10 @@ export async function resolveExecutionTarget(input: {
       cwd: input.defaultWorkspace,
       busyPolicy: "queue",
       queuedForBusySession: false,
+      queuedForBusyWorkspace: false,
+      busyCheckoutSessionKey: null,
     };
+    return applyCheckoutBusyPolicy(legacyPlan, input);
   }
 
   const placement = await resolvePlacement(input.api, input.cfg, target, input.selected, input.defaultWorkspace, input.instanceKey);
@@ -274,7 +331,7 @@ export async function resolveExecutionTarget(input: {
     }
   }
 
-  return {
+  const plan: ExecutionTargetPlan = {
     legacy,
     requestedInstanceKey: target.instanceKey,
     instanceKey: input.instanceKey,
@@ -290,5 +347,38 @@ export async function resolveExecutionTarget(input: {
     nodeId: target.nodeId,
     busyPolicy: target.busyPolicy,
     queuedForBusySession,
+    queuedForBusyWorkspace: false,
+    busyCheckoutSessionKey: null,
+  };
+  return applyCheckoutBusyPolicy(plan, input);
+}
+
+function applyCheckoutBusyPolicy(
+  plan: ExecutionTargetPlan,
+  input: {
+    api: OpenClawPluginApi;
+    cfg: OpenClawConfig;
+    defaultWorkspace: string;
+  },
+): ExecutionTargetPlan {
+  // Distinct managed worktrees are unsupported today; when present they would be a
+  // separate checkout resource. Same normalized path remains exclusive.
+  const excludeSessionKey = plan.sessionPolicy === "continue" ? plan.actualSessionKey : null;
+  const occupant = findBusyCheckoutOccupant(
+    plan.cwd,
+    listCheckoutOccupants(input.api, input.cfg, input.defaultWorkspace),
+    excludeSessionKey,
+  );
+  if (!occupant) return plan;
+  if (plan.busyPolicy === "reject") {
+    throw new ExactTargetError(
+      "workspace_busy",
+      `Checkout ${plan.cwd} already has an active write-capable run in session ${occupant.sessionKey}`,
+    );
+  }
+  return {
+    ...plan,
+    queuedForBusyWorkspace: true,
+    busyCheckoutSessionKey: occupant.sessionKey,
   };
 }

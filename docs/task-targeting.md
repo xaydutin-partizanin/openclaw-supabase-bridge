@@ -71,4 +71,6 @@ Configured project/workspace keys and paths are cross-checked against `runtime.a
 
 `queue` retains the exact busy session and lets OpenClaw serialize it. `reject` fails before execution. There is no preemption or unrelated-run cancellation.
 
+Checkout exclusivity: any active OpenClaw session whose spawned cwd/workspace (or, when absent, the configured agent workspace) resolves to the same normalized checkout path occupies that path. `session_policy=new` and legacy targets cannot bypass this with a fresh session id. Distinct managed worktrees are not exposed on this OpenClaw build; until they are, only a different checkout path counts as a separate resource. `busy_policy=queue` waits for the checkout to become free before `runEmbeddedAgent`; `reject` fails with `workspace_busy`. Continue-session busy checks still exclude the continued session itself so existing same-session queue/reject semantics remain intact.
+
 `task_relations` supports `depends_on`, `parent`, `followup`, and `sibling` as queryable metadata; it does not auto-schedule dependencies. `v_task_relation_cycles` detects multi-hop cycles.
