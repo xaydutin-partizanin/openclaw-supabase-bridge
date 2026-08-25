@@ -230,4 +230,24 @@ describe("exact task targeting through public plugin runtime surfaces", () => {
     }), host({ sessions: [other] }));
     expect(result.queuedForBusyWorkspace).toBe(false);
   });
+
+  it("does not treat a terminal session with a lingering recovery marker as occupying the checkout", async () => {
+    const stale = {
+      sessionKey: "agent:main:supabase-bridge:old-task",
+      entry: {
+        sessionId: "40000000-0000-4000-8000-000000000003",
+        status: "done",
+        restartRecoveryDeliveryRunId: "stale-recovery-run",
+      },
+    };
+    const result = await resolve(target({
+      sessionPolicy: "new",
+      workspacePath: MAIN_WORKSPACE,
+      busyPolicy: "queue",
+    }), host({ sessions: [stale] }));
+    expect(result).toMatchObject({
+      queuedForBusyWorkspace: false,
+      busyCheckoutSessionKey: null,
+    });
+  });
 });

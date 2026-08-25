@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { asRecord, asString } from "./object-utils.js";
+import { sessionEntryHasActiveRun } from "./session-activity.js";
 import { listAllSessionEntries, listConfiguredAgents } from "./telemetry/public-runtime.js";
 import type { AgentConfigRecord, ExecutionTargetPlan, TaskTargetRecord } from "./types.js";
 
@@ -114,7 +115,7 @@ function sessionCandidate(summary: unknown): SessionCandidate | null {
     key,
     sessionId,
     agentId: sessionAgentId(key),
-    hasActiveRun: asString(entry.status) === "running" || Boolean(asString(entry.restartRecoveryDeliveryRunId)),
+    hasActiveRun: sessionEntryHasActiveRun(entry),
   };
 }
 

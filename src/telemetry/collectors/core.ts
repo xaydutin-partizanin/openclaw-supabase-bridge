@@ -1,5 +1,6 @@
 import { arch, freemem, hostname, platform, release } from "node:os";
 import { asBoolean, asRecord, asString } from "../../object-utils.js";
+import { sessionEntryHasActiveRun } from "../../session-activity.js";
 import type { TelemetryRow } from "../../types.js";
 import { json, nullableString, observedRow, safeMetadata, stableHash, stableKey, write } from "../collector-utils.js";
 import { adaptiveStaleAfterMs } from "../freshness.js";
@@ -164,7 +165,7 @@ export const sessionsCollector: TelemetryCollector = {
       if (!key || !sessionId) continue;
       const agentId = agentIdFromSessionKey(key);
       const configuredAgent = configuredAgents.get(agentId);
-      const hasActiveRun = asString(session.status) === "running" || Boolean(asString(session.restartRecoveryDeliveryRunId));
+      const hasActiveRun = sessionEntryHasActiveRun(session);
       const archived = typeof session.archivedAt === "number";
       const pinned = typeof session.pinnedAt === "number";
       const lastReadAt = typeof session.lastReadAt === "number" ? session.lastReadAt : 0;
