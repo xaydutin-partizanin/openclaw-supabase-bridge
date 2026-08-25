@@ -2,6 +2,7 @@ export type JsonPrimitive = null | boolean | number | string;
 export type Json = JsonPrimitive | Json[] | { [key: string]: Json };
 
 export type BridgeTaskStatus =
+  | "staged"
   | "pending"
   | "claimed"
   | "running"
@@ -10,7 +11,7 @@ export type BridgeTaskStatus =
   | "cancelled"
   | "timed_out";
 
-export type BridgeRunStatus = Exclude<BridgeTaskStatus, "pending"> | "created";
+export type BridgeRunStatus = Exclude<BridgeTaskStatus, "staged" | "pending"> | "created";
 
 export type TaskSessionPolicy = "new" | "continue" | "fork";
 export type TaskBusyPolicy = "queue" | "reject";

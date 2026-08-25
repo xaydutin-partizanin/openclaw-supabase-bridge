@@ -47,6 +47,7 @@ export interface BridgeDatabase {
   getLatestRunForTask(taskId: string): Promise<BridgeRun | null>;
   getTaskTarget(taskId: string): Promise<TaskTargetRecord | null>;
   claimTask(taskId: string, workerId: string, leaseSeconds: number): Promise<BridgeTask | null>;
+  releaseStagedTask(taskId: string): Promise<BridgeTask | null>;
   renewLease(taskId: string, workerId: string, leaseSeconds: number): Promise<boolean>;
   startRun(input: StartRunInput): Promise<BridgeRun>;
   failClaimedTask(taskId: string, workerId: string, error: string, reportText: string): Promise<boolean>;
@@ -315,6 +316,15 @@ export class SupabaseBridgeDatabase implements BridgeDatabase {
       p_lease_seconds: leaseSeconds,
     });
     if (error) throwDatabaseError("claim task", error);
+    const row = unwrapRow(data);
+    return row ? mapTask(row) : null;
+  }
+
+  async releaseStagedTask(taskId: string): Promise<BridgeTask | null> {
+    const { data, error } = await this.#client.rpc("release_staged_bridge_task", {
+      p_task_id: taskId,
+    });
+    if (error) throwDatabaseError("release staged task", error);
     const row = unwrapRow(data);
     return row ? mapTask(row) : null;
   }

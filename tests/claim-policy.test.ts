@@ -21,4 +21,8 @@ describe("task claim policy", () => {
   it("never reclaims a completed task", () => {
     expect(claimTaskInMemory(task({ status: "completed" }), "worker-b", NOW, 300)).toBeNull();
   });
+
+  it("never claims a staged task", () => {
+    expect(claimTaskInMemory(task({ status: "staged" }), "worker-a", NOW, 300)).toBeNull();
+  });
 });

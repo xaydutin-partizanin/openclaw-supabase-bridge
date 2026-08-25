@@ -62,7 +62,7 @@ Do not place secrets in `prompt`, `metadata`, or any other task field.
 
 If a legacy task has no `task_targets` row, the old fallback behavior is unchanged: a missing, unknown, or unavailable `requested_config` falls back to the available default and records the reason. An explicitly targeted task never silently changes agent, session, instance, workspace, worktree, or requested configuration.
 
-For targeted work, use the atomic `submit_bridge_task_v2` RPC so Realtime cannot observe the task before its target exists. On external-plugin installs of OpenClaw 2026.7.1-2, `new` and `continue` are supported; `fork` is accepted by the schema but fails explicitly as `session_fork_unsupported` because transcript forking has no public external-plugin API. `busy_policy` supports `queue` and `reject`. Exact examples are in [task targeting](docs/task-targeting.md).
+For targeted work, use the atomic `submit_bridge_task_v2` RPC so Realtime cannot observe the task before its target exists. Pass `p_initial_status := 'staged'` to prepare a task without authorizing execution; call `release_staged_bridge_task(task_id)` to move `staged -> pending` when it may be claimed. On external-plugin installs of OpenClaw 2026.7.1-2, `new` and `continue` are supported; `fork` is accepted by the schema but fails explicitly as `session_fork_unsupported` because transcript forking has no public external-plugin API. `busy_policy` supports `queue` and `reject`. Exact examples are in [task targeting](docs/task-targeting.md).
 
 ## Provider/config discovery
 
@@ -191,6 +191,7 @@ Realtime is notification only; Postgres is durable truth. The plugin:
 - uses OpenClaw’s durable channel ingress queue when the runtime grants it; ordinary external installs fall back to an in-memory notification queue while Supabase claims, leases, and reconciliation remain the durable authority;
 - renews active leases;
 - reconciles pending and expired tasks at startup, after reconnect, and periodically;
+- never reconciles or claims `staged` tasks; only `release_staged_bridge_task` makes them pending;
 - uses bounded exponential Realtime reconnect delays;
 - does not rerun an expired `running` task after an ambiguous Gateway crash;
 - records the ambiguous recovery as failed so destructive work is never blindly duplicated;

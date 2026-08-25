@@ -332,6 +332,7 @@ export class BridgeController {
       const tasks = await this.#database.listReconciliationTasks(new Date());
       const enqueue: TaskPayload[] = [];
       for (const task of tasks) {
+        if (task.status === "staged") continue;
         if (task.status === "pending" || task.status === "claimed") {
           enqueue.push({ taskId: task.id });
           continue;

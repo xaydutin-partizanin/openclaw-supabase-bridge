@@ -2,6 +2,15 @@
 
 Use `submit_bridge_task_v2` for targeted work. It inserts the `tasks` and optional `task_targets` rows atomically, avoiding a Realtime race. Direct legacy inserts into `tasks` remain supported.
 
+## Task lifecycle
+
+`staged -> pending -> claimed -> running -> completed|failed|cancelled|timed_out`
+
+- `staged`: uploaded/prepared, **not** claimable. Reconciliation, Realtime claim kicks, and `claim_bridge_task` ignore it.
+- `pending`: authorized to execute; workers may claim.
+- Release: `select * from public.release_staged_bridge_task('<task-uuid>')` (rejects non-staged rows).
+- Submit staged: add `p_initial_status := 'staged'` to `submit_bridge_task_v2` (default remains `pending`).
+
 ## Legacy
 
 ```json
