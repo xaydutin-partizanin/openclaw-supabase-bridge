@@ -25,6 +25,7 @@ import {
   childSessionLooksFailed,
   listActiveChildSessions,
   listChildSessions,
+  listUnauthorizedReplacementChildren,
   type ChildSessionSnapshot,
 } from "./child-sessions.js";
 import {
@@ -32,6 +33,7 @@ import {
   listCheckoutOccupants,
   resolveExecutionTarget,
 } from "./task-targeting.js";
+import { tearDownSessionLineage } from "./session-lineage-teardown.js";
 import { capabilityCollectors } from "./telemetry/collectors/capabilities.js";
 import { coreCollectors } from "./telemetry/collectors/core.js";
 import { operationCollectors } from "./telemetry/collectors/operations.js";
@@ -602,7 +604,11 @@ export class BridgeController {
       let status = terminalStatus(result);
       let reportText = extractReportText(result);
       let error = terminalError(result);
-      if (childWait.watched.length) {
+      if (childWait.unauthorizedReplacements.length) {
+        status = "failed";
+        error = `Unauthorized replacement ACP child session(s) under bridge parent: ${childWait.unauthorizedReplacements.join(", ")}`;
+        reportText = error;
+      } else if (childWait.watched.length) {
         const failedChildren = childWait.watched.filter(childSessionLooksFailed);
         if (failedChildren.length) {
           status = "failed";
@@ -622,6 +628,12 @@ export class BridgeController {
       const isAcp = selected.runtime === "acp";
       const actualProvider = isAcp ? null : (result.meta.agentMeta?.provider ?? selected.providerKey);
       const actualModel = isAcp ? null : (result.meta.agentMeta?.model ?? selected.model);
+      const lineageKeys = [
+        sessionKey,
+        ...childWait.watched.map((child) => child.sessionKey),
+        ...childWait.unauthorizedReplacements,
+      ];
+      const lineageTeardown = await tearDownSessionLineage(this.#api, lineageKeys);
       const metadata = toJson({
         duration_ms: result.meta.durationMs,
         usage: result.meta.agentMeta?.usage,
@@ -634,6 +646,9 @@ export class BridgeController {
         implementation_session_keys: childWait.watched.map((child) => child.sessionKey),
         waited_for_child_sessions: childWait.waited,
         implementation_complete: childWait.watched.length > 0 ? true : null,
+        unauthorized_replacement_session_keys: childWait.unauthorizedReplacements,
+        lineage_torn_down: lineageTeardown.deleted,
+        lineage_teardown_failed: lineageTeardown.failed,
         openclaw_reported_runtime: isAcp
           ? {
               provider: result.meta.agentMeta?.provider,
@@ -654,6 +669,8 @@ export class BridgeController {
           orchestration_handed_off: orchestrationHandedOff(result),
           implementation_session_keys: childWait.watched.map((child) => child.sessionKey),
           waited_for_child_sessions: childWait.waited,
+          unauthorized_replacement_session_keys: childWait.unauthorizedReplacements,
+          lineage_torn_down: lineageTeardown.deleted,
         },
         maxPayloadBytes: this.#config.eventMaxPayloadBytes,
       }));
@@ -675,6 +692,8 @@ export class BridgeController {
           orchestration_ended_at: orchestrationEndedAt,
           implementation_session_keys: childWait.watched.map((child) => child.sessionKey),
           waited_for_child_sessions: childWait.waited,
+          unauthorized_replacement_session_keys: childWait.unauthorizedReplacements,
+          lineage_torn_down: lineageTeardown.deleted,
         },
         error,
         metadata,
@@ -692,14 +711,26 @@ export class BridgeController {
     } catch (error) {
       const message = errorMessage(error);
       const sourceRunId = this.#correlator.sourceRunIdForBridgeRun(runId);
+      const lineageTeardown = await tearDownSessionLineage(this.#api, [
+        sessionKey,
+        ...listChildSessions(this.#api, this.#cfg, sessionKey).map((child) => child.sessionKey),
+      ]);
       await this.#terminalWriter.write({
         taskId: task.id,
         runId,
         status: "failed",
         reportText: `OpenClaw failed before producing a final report: ${message}`,
-        report: { summary: "OpenClaw execution failed", error: message },
+        report: {
+          summary: "OpenClaw execution failed",
+          error: message,
+          lineage_torn_down: lineageTeardown.deleted,
+        },
         error: message,
-        metadata: { execution_exception: true },
+        metadata: {
+          execution_exception: true,
+          lineage_torn_down: lineageTeardown.deleted,
+          lineage_teardown_failed: lineageTeardown.failed,
+        },
         openclawRunId: sourceRunId,
         openclawTaskId: null,
         actualProviderKey: selected.runtime === "acp" ? null : selected.providerKey,
@@ -722,19 +753,64 @@ export class BridgeController {
     expectChildren: boolean;
     knownChildKeys: string[];
     abortSignal: AbortSignal;
-  }): Promise<{ waited: boolean; watched: ChildSessionSnapshot[] }> {
-    const watchedKeys = new Set(input.knownChildKeys);
+  }): Promise<{ waited: boolean; watched: ChildSessionSnapshot[]; unauthorizedReplacements: string[] }> {
+    const authorizedKeys = new Set(input.knownChildKeys);
+    let lineageLocked = authorizedKeys.size > 0;
     const graceDeadline = Date.now() + (input.expectChildren ? CHILD_APPEAR_GRACE_MS : 0);
+    const unauthorizedReplacements: string[] = [];
 
-    const refreshWatched = (): ChildSessionSnapshot[] => {
+    const snapshotsForAuthorized = (): ChildSessionSnapshot[] => {
       const children = listChildSessions(this.#api, this.#cfg, input.parentSessionKey);
-      for (const child of children) watchedKeys.add(child.sessionKey);
       const byKey = new Map(children.map((child) => [child.sessionKey, child]));
-      return [...watchedKeys].map((key) => byKey.get(key)).filter((child): child is ChildSessionSnapshot => Boolean(child));
+      return [...authorizedKeys]
+        .map((key) => byKey.get(key))
+        .filter((child): child is ChildSessionSnapshot => Boolean(child));
     };
 
-    let watched = refreshWatched();
-    let active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey);
+    const discoverFirstWave = (): void => {
+      if (lineageLocked) return;
+      const live = listChildSessions(this.#api, this.#cfg, input.parentSessionKey);
+      for (const child of live) authorizedKeys.add(child.sessionKey);
+      if (authorizedKeys.size > 0) lineageLocked = true;
+    };
+
+    const rejectUnauthorized = async (): Promise<string[]> => {
+      if (!lineageLocked) return [];
+      const replacements = listUnauthorizedReplacementChildren(
+        this.#api,
+        this.#cfg,
+        input.parentSessionKey,
+        authorizedKeys,
+      );
+      if (!replacements.length) return [];
+      const keys = replacements.map((child) => child.sessionKey);
+      this.#logger.warn("Supabase Bridge rejected unauthorized replacement ACP children", {
+        taskId: input.taskId,
+        parentSessionKey: input.parentSessionKey,
+        unauthorizedSessionKeys: keys,
+        authorizedSessionKeys: [...authorizedKeys],
+      });
+      this.#eventBuffer?.append(manualEvent({
+        taskId: input.taskId,
+        runId: input.runId,
+        type: "unauthorized_replacement_child",
+        data: {
+          parent_session_key: input.parentSessionKey,
+          unauthorized_session_keys: keys,
+          authorized_session_keys: [...authorizedKeys],
+        },
+        maxPayloadBytes: this.#config.eventMaxPayloadBytes,
+      }));
+      await tearDownSessionLineage(this.#api, keys);
+      unauthorizedReplacements.push(...keys);
+      return keys;
+    };
+
+    discoverFirstWave();
+    let watched = snapshotsForAuthorized();
+    let active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey)
+      .filter((child) => !lineageLocked || authorizedKeys.has(child.sessionKey));
+
     while (input.expectChildren && active.length === 0 && watched.length === 0 && Date.now() < graceDeadline) {
       if (input.abortSignal.aborted) throw new Error("Task cancelled while waiting for implementation children");
       await new Promise<void>((resolve, reject) => {
@@ -746,20 +822,27 @@ export class BridgeController {
         input.abortSignal.addEventListener("abort", onAbort, { once: true });
         timer.unref?.();
       });
-      watched = refreshWatched();
-      active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey);
+      discoverFirstWave();
+      watched = snapshotsForAuthorized();
+      active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey)
+        .filter((child) => !lineageLocked || authorizedKeys.has(child.sessionKey));
     }
 
-    watched = refreshWatched();
-    active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey);
+    discoverFirstWave();
+    watched = snapshotsForAuthorized();
+    active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey)
+      .filter((child) => authorizedKeys.has(child.sessionKey));
     if (active.length === 0) {
-      return { waited: false, watched };
+      await rejectUnauthorized();
+      return { waited: false, watched, unauthorizedReplacements: [...new Set(unauthorizedReplacements)] };
     }
 
+    // Lock the first-wave lineage before waiting so yield/resume cannot enlarge it.
+    lineageLocked = true;
     this.#logger.info("Supabase Bridge waiting for implementation children", {
       taskId: input.taskId,
       parentSessionKey: input.parentSessionKey,
-      childSessionKeys: active.map((child) => child.sessionKey),
+      childSessionKeys: [...authorizedKeys],
     });
     this.#eventBuffer?.append(manualEvent({
       taskId: input.taskId,
@@ -767,25 +850,26 @@ export class BridgeController {
       type: "implementation_child_wait",
       data: {
         parent_session_key: input.parentSessionKey,
-        child_session_keys: active.map((child) => child.sessionKey),
+        child_session_keys: [...authorizedKeys],
+        lineage_locked: true,
       },
       maxPayloadBytes: this.#config.eventMaxPayloadBytes,
     }));
 
     while (!input.abortSignal.aborted) {
-      watched = refreshWatched();
-      for (const child of listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey)) {
-        watchedKeys.add(child.sessionKey);
+      if ((await rejectUnauthorized()).length) {
+        watched = snapshotsForAuthorized();
+        return { waited: true, watched, unauthorizedReplacements: [...new Set(unauthorizedReplacements)] };
       }
+      watched = snapshotsForAuthorized();
       active = listActiveChildSessions(this.#api, this.#cfg, input.parentSessionKey)
-        .filter((child) => watchedKeys.has(child.sessionKey));
+        .filter((child) => authorizedKeys.has(child.sessionKey));
       if (active.length === 0) {
-        watched = refreshWatched();
         this.#logger.info("Supabase Bridge implementation children finished", {
           taskId: input.taskId,
           childSessionKeys: watched.map((child) => child.sessionKey),
         });
-        return { waited: true, watched };
+        return { waited: true, watched, unauthorizedReplacements: [...new Set(unauthorizedReplacements)] };
       }
       this.#eventBuffer?.append(manualEvent({
         taskId: input.taskId,
@@ -794,6 +878,7 @@ export class BridgeController {
         data: {
           parent_session_key: input.parentSessionKey,
           child_session_keys: active.map((child) => child.sessionKey),
+          lineage_locked: true,
         },
         maxPayloadBytes: this.#config.eventMaxPayloadBytes,
       }));

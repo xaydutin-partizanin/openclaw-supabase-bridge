@@ -59,5 +59,20 @@ export function listActiveChildSessions(
 
 export function childSessionLooksFailed(child: ChildSessionSnapshot): boolean {
   const status = (child.status ?? "").toLowerCase();
-  return FAILED_CHILD_STATUSES.has(status);
+  return FAILED_CHILD_STATUSES.has(status) || status === "manually_terminated" || status === "killed";
+}
+
+/**
+ * Children under `parentSessionKey` that are not in the authorized first-wave set.
+ * These are the silent replacement ACP lineages OpenClaw can spawn after yield/resume.
+ */
+export function listUnauthorizedReplacementChildren(
+  api: OpenClawPluginApi,
+  cfg: OpenClawConfig,
+  parentSessionKey: string,
+  authorizedSessionKeys: ReadonlySet<string>,
+): ChildSessionSnapshot[] {
+  return listChildSessions(api, cfg, parentSessionKey).filter(
+    (child) => !authorizedSessionKeys.has(child.sessionKey),
+  );
 }
